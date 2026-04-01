@@ -1,4 +1,6 @@
 api
 venv
+.venv
 .vscode
 ZGS
+odseki.csv
