@@ -3,3 +3,4 @@
 requests
 numpy
 flask==2.3.2
+pandas
