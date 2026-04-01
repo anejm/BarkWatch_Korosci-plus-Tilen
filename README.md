@@ -1,0 +1,1 @@
+# BarkWatch-arnes_hackathon2026
