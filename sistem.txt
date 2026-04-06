@@ -1,0 +1,33 @@
+DATA PROCESSING/FETCHING:
+============================
+
+{
+
+posek_processing.py | id, datum -> id, mesec, time features, predictions, ... // ŽAN
+odsek_processing.py | vzameš smiselne informacije // VALENTIN
+segment_processing.py | vzameš smiselne informacije // VALENTIN
+meritve_processing.py | id, datum -> id, mesec // MIČO
+
+============================
+
+bliznje_vremenskepostaje.py | o_id -> vp_id1, vp2_id // LOVRO
+bliznji_odseki.py | o_id -> o_id1, o_id2, o_id3, ... // LOVRO
+
+============================
+
+agg_sestoji_odseke.py --- izračuna pomembne podatke sestojev za vsak odsek // TILEN
+agg_posek_meritve.py --- izračuna pomembne podatke vremena/temp, ... za vsak posek_processing // MIČO
+agg_posek_sosedi.py --- izračuna pomembne podatke sosedov // 
+
+}
+
+join_data.py
+
+============================
+============================
+
+training.py/ testing.py
+postprocessing.py
+results.py
+
+pipeline.py
