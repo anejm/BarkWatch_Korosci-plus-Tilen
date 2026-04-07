@@ -74,26 +74,19 @@ def _load_odseki_centroids() -> pd.DataFrame:
     return df.drop(columns=["geometry"])
 
 
-def get_najblizje(odsek_id: str, max_km: float | None = None) -> list[str]:
+def get_najblizje(odsek_id: str) -> list[Odsek]:
     """
-    Return a list of odsek IDs: the given odsek itself plus nearby ones.
+    Return the 10 nearest odseki to the given odsek (excluding itself).
 
     Args:
         odsek_id: odsek code as string, e.g. "31001"
-        max_km:   optional radius in km. If given, returns all odseki within
-                  that distance. If None (default), returns the 10 nearest.
 
     Returns:
-        List of odsek ID strings — first entry is always odsek_id itself,
-        followed by neighbours sorted by ascending distance.
+        List of 10 Odsek objects sorted by ascending distance.
 
     Raises:
-        KeyError:   if odsek_id not found
-        ValueError: if max_km is negative
+        KeyError: if odsek_id not found
     """
-    if max_km is not None and max_km < 0:
-        raise ValueError(f"max_km mora biti nenegativen, dobili smo: {max_km}")
-
     df = _load_odseki_centroids()
 
     rows = df[df["odsek"] == odsek_id]
@@ -108,24 +101,20 @@ def get_najblizje(odsek_id: str, max_km: float | None = None) -> list[str]:
         axis=1,
     )
 
-    if max_km is None:
-        neighbours = others.nsmallest(10, "dist_km")
-    else:
-        neighbours = others[others["dist_km"] <= max_km].sort_values("dist_km")
-
-    return [odsek_id] + neighbours["odsek"].tolist()
+    top10 = others.nsmallest(10, "dist_km")
+    return [
+        Odsek(rank=rank, id=row["odsek"], dist_km=round(float(row["dist_km"]), 3))
+        for rank, (_, row) in enumerate(top10.iterrows(), start=1)
+    ]
 
 
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 2:
-        print("Usage: python bliznji_odseki.py <odsek_id> [max_km]")
-        sys.exit(1)
+    odsek = sys.argv[1] if len(sys.argv) > 1 else "31001"
 
-    odsek = sys.argv[1]
-    max_km = float(sys.argv[2]) if len(sys.argv) > 2 else None
-
-    result = get_najblizje(odsek, max_km=max_km)
-    label = f"v radiju {max_km} km" if max_km is not None else "10 najbližjih"
-    print(f"\nOdsek + {label} ({len(result) - 1} sosedov): {result}")
+    result = get_najblizje(odsek)
+    print(f"\nOdsek: {odsek}")
+    print("\nTop 10 najbližjih odsekov:")
+    for o in result:
+        print(f"  {o}")
