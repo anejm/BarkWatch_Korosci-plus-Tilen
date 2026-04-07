@@ -1,8 +1,9 @@
 """
 Lookup top 3 weather stations and weather data for a given odsek ID.
+Computes nearest stations on-the-fly from odseki geometry and station coordinates.
 
 Usage:
-    from postaje_lookup import get_postaje, get_vreme
+    from bliznje_vremenske_postaje import get_postaje, get_vreme
 
     # nearest stations
     result = get_postaje("31001")
@@ -15,16 +16,31 @@ Usage:
     print(vreme["all"])     # DataFrame from nearest all-data station
 """
 
-import csv
+import math
 from pathlib import Path
 from functools import lru_cache
 from dataclasses import dataclass
 from datetime import date
 
 import pandas as pd
+from shapely import wkt
+import pyproj
 
-CSV_PATH   = Path(__file__).parent / "odseki_postaje.csv"
-VREME_PATH = Path(__file__).parent / "vreme.csv"
+_BASE = Path(__file__).parent.parent.parent
+ODSEKI_DIR   = _BASE / "data" / "processed"
+LOKACIJE_PATH = _BASE / "data" / "raw" / "ARSO" / "lokacije.csv"
+VREME_PATH    = _BASE / "data" / "raw" / "ARSO" / "vreme.csv"
+
+_ODSEKI_FILES = [
+    ODSEKI_DIR / "odseki_01.csv",
+    ODSEKI_DIR / "odseki_02.csv",
+    ODSEKI_DIR / "odseki_03.csv",
+    ODSEKI_DIR / "odseki_04.csv",
+    ODSEKI_DIR / "odseki_05.csv",
+]
+
+# Odseki geometry CRS → WGS84
+_TRANSFORMER = pyproj.Transformer.from_crs("EPSG:3794", "EPSG:4326", always_xy=True)
 
 # Mapping of garbled column names → clean names (double-encoded UTF-8 artifact)
 _COL_RENAME = {
@@ -46,17 +62,47 @@ class Postaja:
     dist_km: float
 
     def __repr__(self):
-        return f"#{self.rank} {self.name} (id={self.id}, {self.dist_km} km)"
+        return f"#{self.rank} {self.name} (id={self.id}, {self.dist_km:.2f} km)"
+
+
+def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """Great-circle distance in km between two WGS84 points."""
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 @lru_cache(maxsize=1)
-def _load_index() -> dict[str, dict]:
-    """Load CSV into dict keyed by odsek code. Cached after first call."""
-    index = {}
-    with open(CSV_PATH, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            index[row["odsek"]] = row
-    return index
+def _load_odseki() -> pd.DataFrame:
+    """Load all odseki CSVs, keep only odsek + geometry columns. Cached."""
+    frames = []
+    for path in _ODSEKI_FILES:
+        if path.exists():
+            df = pd.read_csv(path, encoding="utf-8", usecols=["odsek", "geometry"])
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True)
+
+
+@lru_cache(maxsize=1)
+def _load_lokacije() -> pd.DataFrame:
+    """Load station locations. Cached."""
+    return pd.read_csv(LOKACIJE_PATH, encoding="utf-8")
+
+
+def _odsek_centroid_wgs84(odsek_id: str) -> tuple[float, float]:
+    """Return (lon, lat) in WGS84 for the centroid of the given odsek."""
+    df = _load_odseki()
+    rows = df[df["odsek"] == odsek_id]
+    if rows.empty:
+        raise KeyError(f"Odsek '{odsek_id}' not found.")
+    geom_str = rows.iloc[0]["geometry"]
+    geom = wkt.loads(geom_str)
+    cx, cy = geom.centroid.x, geom.centroid.y
+    lon, lat = _TRANSFORMER.transform(cx, cy)
+    return lon, lat
 
 
 def get_postaje(odsek_id: str) -> dict[str, list[Postaja]]:
@@ -75,28 +121,31 @@ def get_postaje(odsek_id: str) -> dict[str, list[Postaja]]:
     Raises:
         KeyError: if odsek_id not found
     """
-    index = _load_index()
-    if odsek_id not in index:
-        raise KeyError(f"Odsek '{odsek_id}' not found. "
-                       f"Example valid ID: '{next(iter(index))}'")
+    lon0, lat0 = _odsek_centroid_wgs84(odsek_id)
+    stations = _load_lokacije()
 
-    row = index[odsek_id]
+    distances = stations.apply(
+        lambda r: _haversine_km(lon0, lat0, r["Longitude"], r["Latitude"]),
+        axis=1,
+    )
+    stations = stations.copy()
+    stations["dist_km"] = distances
 
-    def parse_group(prefix: str) -> list[Postaja]:
+    def top3(type_filter) -> list[Postaja]:
+        subset = stations[stations["Type"].isin(type_filter)].nsmallest(3, "dist_km")
         result = []
-        for rank in range(1, 4):
-            p = f"{prefix}_{rank}"
+        for rank, (_, row) in enumerate(subset.iterrows(), start=1):
             result.append(Postaja(
                 rank=rank,
-                id=int(row[f"{p}_id"]),
-                name=row[f"{p}_name"],
-                dist_km=float(row[f"{p}_dist_km"]),
+                id=int(row["ID"]),
+                name=row["Name"],
+                dist_km=round(float(row["dist_km"]), 3),
             ))
         return result
 
     return {
-        "temp": parse_group("top3_temp"),
-        "all":  parse_group("top3_all"),
+        "temp": top3([2, 3]),
+        "all":  top3([1, 2, 3]),
     }
 
 
@@ -130,9 +179,6 @@ def get_vreme(
             "temp": pd.DataFrame,  # data from nearest type-2/3 station
             "all":  pd.DataFrame,  # data from nearest type-1/2/3 station
         }
-        Each DataFrame has columns: datum, station_id, station_name,
-        povp_T_degC, max_T_degC, min_T_degC, padavine_mm,
-        snezna_odeja_cm, novi_sneg_cm, nevihta, toca, viharni_veter
 
     Raises:
         KeyError: if odsek_id not found
