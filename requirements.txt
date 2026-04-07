@@ -8,3 +8,6 @@ pandas
 geopandas
 shapely
 pyproj
+scikit-learn
+xgboost
+joblib
