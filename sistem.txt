@@ -17,7 +17,7 @@ bliznji_odseki.py | o_id -> o_id1, o_id2, o_id3, ... // LOVRO
 
 agg_sestoji_odseke.py --- izračuna pomembne podatke sestojev za vsak odsek // TILEN
 agg_posek_meritve.py --- izračuna pomembne podatke vremena/temp, ... za vsak posek_processing // MIČO
-agg_posek_sosedi.py --- izračuna pomembne podatke sosedov // 
+agg_posek_sosedi.py --- izračuna pomembne podatke sosedov // TILEN
 
 }
 

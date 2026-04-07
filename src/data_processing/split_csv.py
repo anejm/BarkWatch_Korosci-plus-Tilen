@@ -2,12 +2,23 @@
 Split large CSV files into <100MB parts for GitHub upload, and recombine them.
 Works at the raw byte level — no parsing, fully lossless.
 
-Usage:
-    split("data/processed/odseki.csv")
-    combine("data/processed/odseki_01.csv")  # pass any part, finds the rest automatically
+Usage (as a module):
+    split("data/processed/odseki_processed.csv")
+    combine("data/processed/odseki_processed_01.csv")  # pass any part, finds the rest automatically
+
+Usage (from the command line, inside the project venv):
+    # activate venv first (from project root):
+    source .venv/bin/activate
+
+    # split a file:
+    python src/data_processing/split_csv.py path/to/file.csv
+
+    # recombine (pass any part):
+    python src/data_processing/split_csv.py path/to/file_01.csv --combine
 """
 
 import re
+import sys
 from pathlib import Path
 
 MAX_BYTES = 95_000_000  # 95 MB decimal — safely under GitHub's 100 MB limit
@@ -96,6 +107,13 @@ def combine(any_part: str | Path, out_path: str | Path | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    parts = split("data/processed/odseki.csv")
-    if len(parts) > 1:
-        combine(parts[0])
+    if len(sys.argv) < 2:
+        print("Usage: python split_csv.py <file.csv> [--combine]")
+        sys.exit(1)
+
+    input_file = sys.argv[1]
+
+    if "--combine" in sys.argv:
+        combine(input_file)
+    else:
+        split(input_file)

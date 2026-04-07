@@ -1,6 +1,7 @@
-api
 venv
 .venv
 .vscode
-ZGS
-odseki.csv
+data/processed/odseki_processed.csv
+data/raw/ZGS/odseki_gozdno.gpkg
+data/raw/ZGS/sestoji.gpkg
+api/
