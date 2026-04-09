@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --partition=gpu
+#SBATCH --partition=cpu
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -41,13 +41,13 @@ fi
 # Step 5: Train model on train/val data
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running train.py ..."
-python src/training/train.py
+python src/training/train.py 
 
 # ---------------------------------------------------------------------------
 # Step 6: Run inference on test data
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running testing.py ..."
-python src/training/testing.py
+python src/training/testing.py 
 
 # ---------------------------------------------------------------------------
 # Done
