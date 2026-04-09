@@ -22,11 +22,16 @@ set -euo pipefail
 # Create logs dir if it doesn't exist
 mkdir -p logs
 
-# Set up virtual environment if not already present
-if [ ! -d "venv" ]; then
+# Set up virtual environment — recreate if Python version changed
+PYTHON_VERSION=$(python --version 2>&1)
+VENV_MARKER="venv/.python_version"
+
+if [ ! -d "venv" ] || [ ! -f "$VENV_MARKER" ] || [ "$(cat $VENV_MARKER)" != "$PYTHON_VERSION" ]; then
+    rm -rf venv
     python -m venv venv
     source venv/bin/activate
     pip install -q -r requirements.txt
+    echo "$PYTHON_VERSION" > "$VENV_MARKER"
 else
     source venv/bin/activate
 fi
