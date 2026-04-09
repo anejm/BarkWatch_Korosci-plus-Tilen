@@ -103,6 +103,12 @@ train_df = pd.read_csv(train_path, low_memory=False)
 val_df   = pd.read_csv(val_path, low_memory=False)
 present_index_cols = _present_index_cols(train_df)
 
+missing_targets = [c for c in TARGET_COLS if c not in train_df.columns]
+if missing_targets:
+    print(f"ERROR: target columns not found: {missing_targets}")
+    print(f"Available columns: {train_df.columns.tolist()}")
+    raise SystemExit(1)
+
 
 def split_xy(df: pd.DataFrame):
     df = df.drop(columns=DROP_COLS + present_index_cols, errors="ignore")
