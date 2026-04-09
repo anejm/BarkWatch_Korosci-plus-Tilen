@@ -187,19 +187,27 @@ def step_join(
     if "ggo" not in base.columns:
         raise ValueError("posek_processed is missing 'ggo'; run updated posek_processing first.")
 
+    # Determine ggo dtype from base and cast all agg tables to match
+    ggo_dtype = base.schema["ggo"]
+
+    def _align_ggo(df: pl.DataFrame) -> pl.DataFrame:
+        if df.schema["ggo"] != ggo_dtype:
+            df = df.with_columns(pl.col("ggo").cast(ggo_dtype))
+        return df
+
     # agg tables use ['ggo', 'odsek_id'] as their composite key; align with posek's ['ggo', 'odsek']
-    meritve_clean = agg_meritve_df.rename({"odsek_id": "odsek"})
+    meritve_clean = _align_ggo(agg_meritve_df.rename({"odsek_id": "odsek"}))
     # drop 'used_station' — internal join-artifact, not a model feature
     if "used_station" in meritve_clean.columns:
         meritve_clean = meritve_clean.drop("used_station")
     base = base.join(meritve_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
     log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
 
-    sosedi_clean = agg_sosedi_df.rename({"odsek_id": "odsek"})
+    sosedi_clean = _align_ggo(agg_sosedi_df.rename({"odsek_id": "odsek"}))
     base = base.join(sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
     log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
 
-    sestoji_clean = agg_sestoji_df.rename({"odsek_id": "odsek"})
+    sestoji_clean = _align_ggo(agg_sestoji_df.rename({"odsek_id": "odsek"}))
     base = base.join(sestoji_clean, on=["ggo", "odsek"], how="left", suffix="_odsek")
     log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
 
