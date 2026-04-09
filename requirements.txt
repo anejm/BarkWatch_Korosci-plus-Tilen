@@ -13,5 +13,6 @@ xgboost
 joblib
 polars
 pyarrow
-sklearn
 
+matplotlib
+seaborn

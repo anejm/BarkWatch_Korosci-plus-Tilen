@@ -1,21 +1,23 @@
 """
 testing.py
 ----------
-Loads the two-stage models (XGBClassifier + XGBRegressor per horizon) and
-produces predictions on test.csv.
+Load saved models and produce predictions on the test set.
 
-Each horizon's prediction = clf.predict(X) * max(reg.predict(X), 0)
-  → 0 when the classifier says no event, regressor magnitude otherwise.
+Predictions are built sequentially: each horizon h_i uses the base test
+features augmented with predictions from models h1..h(i-1), matching the
+feature set each model was trained on (stored in model["feature_cols"]).
 
-Input:
+Inputs:
   models/xgb_models.pkl
-  data/processed/splits/test.csv
+  data/test.csv  (or data/test_short.csv with --short)
+  data/processed/target.csv  — for evaluation (optional; skipped if absent)
 
 Output:
   data/predictions/predictions.csv
-    Columns: ggo, odsek, leto_mesec, h1_pred .. h12_pred
+    Columns: <id cols>, h1_pred .. h12_pred
 """
 
+import argparse
 import joblib
 import numpy as np
 import pandas as pd
@@ -26,118 +28,195 @@ from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-ROOT       = Path(__file__).resolve().parents[2]
-MODEL_PATH = ROOT / "models" / "xgb_models.pkl"
-TEST_PATH  = ROOT / "data" / "processed" / "splits" / "test.csv"
-PRED_DIR   = ROOT / "data" / "predictions"
+ROOT        = Path(__file__).resolve().parents[2]
+DATA_DIR    = ROOT / "data" / "processed" / "splits"
+MODEL_PATH  = ROOT / "models" / "xgb_models.pkl"
+TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
+PRED_DIR    = ROOT / "data" / "predictions"
 PRED_DIR.mkdir(parents=True, exist_ok=True)
-PRED_PATH  = PRED_DIR / "predictions.csv"
+PRED_PATH   = PRED_DIR / "predictions.csv"
 
 # ---------------------------------------------------------------------------
-# Config  (must match posek_processing.py)
+# Column config  (must match train.py)
 # ---------------------------------------------------------------------------
-# When True, target.csv h1..h12 are in log1p space and predictions must be
-# expm1'd back to raw kubikov before evaluation and export.
+POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
+DROP_COLS     = ["datum", "leto", "target", "log1p_target"]
+TARGET_COLS   = [f"h{h}" for h in range(1, 13)]
+PRED_COLS     = [f"h{h}_pred" for h in range(1, 13)]
+
+# When True, targets in target.csv are in log1p space; expm1 before evaluation.
 LOG_TARGET: bool = True
 
-# ---------------------------------------------------------------------------
-# Columns  (must match train.py)
-# ---------------------------------------------------------------------------
-INDEX_COLS  = ["ggo", "odsek", "leto_mesec"]
-DROP_COLS   = ["datum"]
-TARGET_COLS = [f"h{h}" for h in range(1, 13)]
-PRED_COLS   = [f"h{h}_pred" for h in range(1, 13)]
-
-
-def _resolve_test_path() -> Path:
-  """Prefer top-level data/test.csv (dummy workflow), fallback to processed split."""
-  test_top = ROOT / "data" / "test.csv"
-  return test_top if test_top.exists() else TEST_PATH
-
-
-def _present_index_cols(df: pd.DataFrame) -> list[str]:
-  cols = [c for c in INDEX_COLS if c in df.columns]
-  required = {"odsek", "leto_mesec"}
-  if not required.issubset(set(cols)):
-    missing = ", ".join(sorted(required - set(cols)))
-    raise ValueError(f"Missing required identifier columns: {missing}")
-  return cols
 
 # ---------------------------------------------------------------------------
-# 1. Load models
+# Helpers
 # ---------------------------------------------------------------------------
-print(f"Loading models from {MODEL_PATH} …")
-models: dict = joblib.load(MODEL_PATH)
-print(f"  Loaded {len(models)} horizon models: {list(models.keys())}")
 
-# ---------------------------------------------------------------------------
-# 2. Load test set
-# ---------------------------------------------------------------------------
-print("Loading test set …")
-test_path = _resolve_test_path()
-test = pd.read_csv(test_path)
-present_index_cols = _present_index_cols(test)
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run BarkWatch test-set inference")
+    p.add_argument("--short", action="store_true",
+                   help="Use test_short.csv instead of test.csv")
+    return p.parse_args()
 
-index   = test[present_index_cols].copy()
-X_test  = test.drop(columns=DROP_COLS + present_index_cols + TARGET_COLS, errors="ignore")
-y_test  = test[TARGET_COLS].copy()
 
-# Drop rows whose lag/rolling features are NaN (first rows per odsek)
-valid_mask   = X_test.notna().all(axis=1)
-X_clean      = X_test[valid_mask].reset_index(drop=True)
-index_clean  = index[valid_mask].reset_index(drop=True)
-y_clean      = y_test[valid_mask].reset_index(drop=True)
+def _join_keys(df_x: pd.DataFrame, df_ref: pd.DataFrame) -> list[str]:
+    return sorted(set(df_x.columns) & set(df_ref.columns) & set(POSSIBLE_KEYS))
 
-dropped = (~valid_mask).sum()
-print(f"  Rows after dropna: {len(X_clean):,}  (dropped {dropped:,} with NaN features)")
 
-# ---------------------------------------------------------------------------
-# 3. Predict
-# ---------------------------------------------------------------------------
-preds = np.zeros((len(X_clean), len(TARGET_COLS)))
+def load_test(short: bool) -> pd.DataFrame:
+    suffix = "_short" if short else ""
+    path   = DATA_DIR / f"test{suffix}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Test file not found: {path}")
+    print(f"Loading test set from {path.name} …")
+    return pd.read_csv(path, low_memory=False)
 
-for i, col in enumerate(TARGET_COLS):
-    stage = models[col]
-    clf_pred = stage["clf"].predict(X_clean)               # 0 or 1
-    reg_pred = np.maximum(stage["reg"].predict(X_clean), 0)
-    preds[:, i] = clf_pred * reg_pred
 
-# ---------------------------------------------------------------------------
-# 3b. Invert log transform so metrics and exports are in raw kubikov space
-# ---------------------------------------------------------------------------
-if LOG_TARGET:
-    preds   = np.expm1(np.maximum(preds, 0))
-    y_clean = pd.DataFrame(np.expm1(y_clean.values), columns=y_clean.columns)
+def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split test into (id_df, X_base), dropping NaN-feature rows."""
+    id_cols   = [c for c in POSSIBLE_KEYS if c in test_x.columns]
+    drop_cols = [c for c in DROP_COLS + TARGET_COLS if c in test_x.columns]
+    feat_cols = [c for c in test_x.columns if c not in id_cols + drop_cols]
 
-# ---------------------------------------------------------------------------
-# 4. Evaluate against ground-truth targets
-# ---------------------------------------------------------------------------
-mae  = mean_absolute_error(y_clean, preds)
-rmse = root_mean_squared_error(y_clean, preds)
+    id_df = test_x[id_cols].reset_index(drop=True)
+    X     = test_x[feat_cols].reset_index(drop=True)
 
-y_clean_arr = y_clean.values
-nz = y_clean_arr > 0
+    valid   = X.notna().all(axis=1)
+    dropped = (~valid).sum()
+    if dropped:
+        print(f"  Dropped {dropped:,} rows with NaN features")
 
-print(f"\nTest metrics (averaged over all 12 horizons):")
-print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}")
-if nz.sum():
-    mae_nz  = mean_absolute_error(y_clean_arr[nz], preds[nz])
-    rmse_nz = root_mean_squared_error(y_clean_arr[nz], preds[nz])
-    print(f"  Non-zero — MAE: {mae_nz:.4f}   RMSE: {rmse_nz:.4f}")
+    return (
+        id_df[valid].reset_index(drop=True),
+        X[valid].reset_index(drop=True),
+    )
 
-print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}")
-for i, col in enumerate(TARGET_COLS):
-    y_true_col = y_clean_arr[:, i]
-    y_pred_col = preds[:, i]
-    h_mae  = mean_absolute_error(y_true_col, y_pred_col)
-    h_rmse = root_mean_squared_error(y_true_col, y_pred_col)
-    nz_col = y_true_col > 0
-    h_mae_nz = mean_absolute_error(y_true_col[nz_col], y_pred_col[nz_col]) if nz_col.sum() else float("nan")
-    print(f"  {col:4s}  {h_mae:10.4f}  {h_mae_nz:10.4f}  {h_rmse:10.4f}")
+
+def _two_stage_predict(clf, reg, X: pd.DataFrame) -> np.ndarray:
+    clf_bin  = clf.predict(X)
+    reg_pred = np.maximum(reg.predict(X), 0)
+    return clf_bin * reg_pred
+
 
 # ---------------------------------------------------------------------------
-# 5. Save predictions
+# Inference
 # ---------------------------------------------------------------------------
-out = pd.concat([index_clean, pd.DataFrame(preds, columns=PRED_COLS)], axis=1)
-out.to_csv(PRED_PATH, index=False)
-print(f"\nPredictions saved → {PRED_PATH}  ({len(out):,} rows)")
+
+def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
+    """
+    Run sequential inference: h_i model receives base features + pred_h1..pred_h(i-1).
+    Returns array of shape (n_rows, 12).
+    """
+    X_aug  = X_base.copy()
+    preds  = np.zeros((len(X_base), 12))
+
+    for i, col in enumerate(TARGET_COLS):
+        m = models[col]
+        feature_cols = m["feature_cols"]
+
+        # Add any missing prediction columns as zeros
+        # (shouldn't happen in normal flow, but guards against edge cases)
+        for fc in feature_cols:
+            if fc not in X_aug.columns:
+                X_aug[fc] = 0.0
+
+        X_aligned    = X_aug[feature_cols]
+        preds[:, i]  = _two_stage_predict(m["clf"], m["reg"], X_aligned)
+
+        # Augment for next horizon
+        if i < 11:
+            X_aug = X_aug.copy()
+            X_aug[f"pred_{col}"] = preds[:, i]
+
+    return preds
+
+
+# ---------------------------------------------------------------------------
+# Evaluation  (runs only when target.csv is available)
+# ---------------------------------------------------------------------------
+
+def evaluate(preds: np.ndarray, id_df: pd.DataFrame, test_x: pd.DataFrame) -> None:
+    if not TARGET_PATH.exists():
+        print("  target.csv not found — skipping evaluation")
+        return
+
+    targets = pd.read_csv(TARGET_PATH, low_memory=False)
+    keys    = _join_keys(id_df, targets)
+    if not keys:
+        print("  No join keys between id_df and target.csv — skipping evaluation")
+        return
+
+    # Merge id_df with targets
+    merged = id_df.merge(targets[keys + TARGET_COLS], on=keys, how="inner")
+    if len(merged) == 0:
+        print("  No rows matched between predictions and targets — skipping evaluation")
+        return
+
+    # Align preds to merged rows via index position (inner merge may reorder)
+    # Use a helper merge to get the row correspondence
+    id_df_with_pos = id_df.copy()
+    id_df_with_pos["_pos"] = np.arange(len(id_df))
+    matched = id_df_with_pos.merge(targets[keys + TARGET_COLS], on=keys, how="inner")
+
+    row_idx  = matched["_pos"].values
+    preds_ev = preds[row_idx]
+    y_true   = matched[TARGET_COLS].values.astype(float)
+
+    if LOG_TARGET:
+        y_true   = np.expm1(np.maximum(y_true, 0))
+        preds_ev = np.expm1(np.maximum(preds_ev, 0))
+
+    mae  = mean_absolute_error(y_true, preds_ev)
+    rmse = root_mean_squared_error(y_true, preds_ev)
+    nz   = y_true > 0
+
+    print(f"\nTest metrics ({len(matched):,} matched rows, all 12 horizons):")
+    print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}")
+    if nz.sum():
+        print(f"  Non-zero — MAE: {mean_absolute_error(y_true[nz], preds_ev[nz]):.4f}"
+              f"   RMSE: {root_mean_squared_error(y_true[nz], preds_ev[nz]):.4f}")
+
+    print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}")
+    for i, col in enumerate(TARGET_COLS):
+        yt     = y_true[:, i]
+        yp     = preds_ev[:, i]
+        nz_col = yt > 0
+        h_mae  = mean_absolute_error(yt, yp)
+        h_rmse = root_mean_squared_error(yt, yp)
+        h_nz   = mean_absolute_error(yt[nz_col], yp[nz_col]) if nz_col.sum() else float("nan")
+        print(f"  {col:4s}  {h_mae:10.4f}  {h_nz:10.4f}  {h_rmse:10.4f}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = parse_args()
+
+    print(f"Loading models from {MODEL_PATH} …")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
+    models: dict = joblib.load(MODEL_PATH)
+    print(f"  Loaded {len(models)} horizon models: {list(models.keys())}")
+
+    test_x            = load_test(short=args.short)
+    id_df, X_base     = prepare_test(test_x)
+    print(f"  Test rows: {len(X_base):,}  |  base features: {X_base.shape[1]}")
+
+    print("\nRunning sequential inference …")
+    preds = predict(models, X_base)
+
+    evaluate(preds, id_df, test_x)
+
+    # Save predictions
+    out = pd.concat(
+        [id_df, pd.DataFrame(preds, columns=PRED_COLS)],
+        axis=1,
+    )
+    out.to_csv(PRED_PATH, index=False)
+    print(f"\nPredictions saved → {PRED_PATH}  ({len(out):,} rows)")
+
+
+if __name__ == "__main__":
+    main()
