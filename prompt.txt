@@ -1,0 +1,3 @@
+Create a job.sh file that will be run by the ARNES HPC.
+The file should run arso_prenos.py, pipeline.py. The file should then take train.csv, test.csv and val.csv and take their first 100 rows, and save them in train_short.csv, val_short.csv and test_short.csv.
+These shortened files should then be able to be taken from the hpc to local computers.
