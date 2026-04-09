@@ -13,3 +13,5 @@ xgboost
 joblib
 polars
 pyarrow
+sklearn
+
