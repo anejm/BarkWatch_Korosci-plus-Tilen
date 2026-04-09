@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --partition=cpu
+#SBATCH --partition=all
 
 # ---------------------------------------------------------------------------
 # Environment
