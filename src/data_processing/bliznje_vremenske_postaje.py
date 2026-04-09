@@ -32,11 +32,11 @@ LOKACIJE_PATH = _BASE / "data" / "raw" / "ARSO" / "lokacije.csv"
 VREME_PATH    = _BASE / "data" / "raw" / "ARSO" / "vreme.csv"
 
 _ODSEKI_FILES = [
-    ODSEKI_DIR / "odseki_01.csv",
-    ODSEKI_DIR / "odseki_02.csv",
-    ODSEKI_DIR / "odseki_03.csv",
-    ODSEKI_DIR / "odseki_04.csv",
-    ODSEKI_DIR / "odseki_05.csv",
+    ODSEKI_DIR / "odseki_processed_01.csv",
+    ODSEKI_DIR / "odseki_processed_02.csv",
+    ODSEKI_DIR / "odseki_processed_03.csv",
+    ODSEKI_DIR / "odseki_processed_04.csv",
+    ODSEKI_DIR / "odseki_processed_05.csv",
 ]
 
 # Odseki geometry CRS → WGS84

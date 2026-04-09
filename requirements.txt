@@ -11,3 +11,5 @@ pyproj
 scikit-learn
 xgboost
 joblib
+polars
+pyarrow

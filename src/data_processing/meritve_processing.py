@@ -136,5 +136,30 @@ def main():
     print(monthly.head(3).to_string())
 
 
+def preprocess() -> "pl.DataFrame":
+    """
+    Load and aggregate raw ARSO weather data to monthly level.
+
+    Returns:
+        polars DataFrame with monthly weather features per station.
+    """
+    import polars as pl
+    df = load_raw(RAW)
+    monthly = aggregate_monthly(df)
+    monthly = add_deltas(monthly)
+
+    col_order = [
+        "station_id", "leto_mesec", "leto", "mesec", "st_dni",
+        "povp_T_avg", "max_T_mesec", "min_T_mesec", "povp_max_T", "povp_min_T", "temp_razpon_avg",
+        "delta_povp_T", "delta_max_T", "delta_min_T",
+        "padavine_skupaj_mm", "padavine_avg_mm", "dni_s_padavinami", "delta_padavine",
+        "snezna_odeja_max_cm", "snezna_odeja_avg_cm", "novi_sneg_skupaj_cm", "dni_s_snegom",
+        "delta_snezna_odeja_max",
+        "dni_nevihta", "dni_toca", "dni_viharni_veter",
+    ]
+    available = [c for c in col_order if c in monthly.columns]
+    return pl.from_pandas(monthly[available])
+
+
 if __name__ == "__main__":
     main()
