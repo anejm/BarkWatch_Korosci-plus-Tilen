@@ -54,11 +54,6 @@ TARGET_COLS = [f"h{h}" for h in range(1, 13)]
 
 
 def _resolve_split_paths() -> tuple[Path, Path]:
-    """Prefer top-level data/*.csv (dummy workflow), fallback to processed splits."""
-    train_top = ROOT / "data" / "train.csv"
-    val_top = ROOT / "data" / "val.csv"
-    if train_top.exists() and val_top.exists():
-        return train_top, val_top
     return SPLITS_DIR / "train.csv", SPLITS_DIR / "val.csv"
 
 
@@ -104,8 +99,8 @@ REG_PARAMS = dict(
 # ---------------------------------------------------------------------------
 print("Loading train / val …")
 train_path, val_path = _resolve_split_paths()
-train_df = pd.read_csv(train_path)
-val_df   = pd.read_csv(val_path)
+train_df = pd.read_csv(train_path, low_memory=False)
+val_df   = pd.read_csv(val_path, low_memory=False)
 present_index_cols = _present_index_cols(train_df)
 
 
