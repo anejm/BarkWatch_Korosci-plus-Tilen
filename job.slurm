@@ -25,10 +25,14 @@ mkdir -p logs
 # Set up virtual environment if not already present
 if [ ! -d "venv" ]; then
     python -m venv venv
+    source venv/bin/activate
+    pip install -q -r requirements.txt
+else
+    source venv/bin/activate
 fi
 
-source venv/bin/activate
-pip install -q -r requirements.txt
+
+
 
 # ---------------------------------------------------------------------------
 # Step 2: Run full data pipeline (produces train/val/test splits)
