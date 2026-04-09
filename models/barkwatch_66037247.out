@@ -1,0 +1,400 @@
+[21:19:18] Running pipeline.py ...
+21:19:19  INFO      Starting BarkWatch data pipeline
+21:19:19  INFO      === Step 1: Preprocessing ===
+21:19:19  INFO        [posek] loading and feature-engineering harvest data...
+21:20:09  INFO        [posek] 4,108,855 rows × 22 cols → posek_processed.csv
+21:20:09  INFO        [odseki] loading forest compartment GeoPackage...
+21:20:11  INFO        [odseki] 53,254 rows × 63 cols → odseki_processed.csv
+21:20:11  INFO        [sestoji] loading forest stand GeoPackage...
+21:20:21  INFO        [sestoji] 350,593 rows × 56 cols → sestoji_processed.csv
+21:20:21  INFO        [meritve] aggregating ARSO weather data to monthly level...
+21:20:34  INFO        [meritve] 51,167 rows × 26 cols → vreme_mesecno.csv
+21:20:34  INFO      === Step 2: Aggregating relationships ===
+21:20:34  INFO        [najblizji] output already exists with ggo key – skipping precomputation
+21:20:34  INFO        [agg_posek_meritve] joining posek with rolling weather features...
+Berem poseke: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/posek_processed.csv
+  Poseki: 4,108,855  |  Unikatnih [ggo, odsek]: 34,417
+
+Berem postaje: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/najblizji_odseki_postaje.csv
+
+Berem vreme: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/vreme_mesecno.csv
+  Vrstice: 51,167  |  Postaje: 217
+
+Predizračun drsečih 12-mesečnih značilk po postajah...
+  Predizračun drsečih 12-mes. oken za 217 postaj...
+  Predizračunane vrstice: 51,167
+
+Iščem postaje za poseke...
+  Poseki z najdeno postajo v tabeli: 4,107,787 / 4,108,855
+  Poseki z najdeno vremensko postajo: 4,102,990 / 4,108,855 (99.9%)
+
+Pridružujem vremenske značilke...
+
+Shranjeno: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/agg_posek_meritve.csv
+  Vrstice: 4,108,855  |  Stolpci: 17
+  Poseki z vremenskimi podatki: 4,102,990
+  Poseki z izpolnjeno prvo vremensko značilko: 4,088,345
+
+Primer (prve 3 vrstice):
+  ggo odsek_id leto_mesec used_station  leto_povp_T_avg  leto_max_T_mesec  leto_min_T_mesec  leto_padavine_skupaj_mm  leto_padavine_avg_mm  leto_dni_s_padavinami  leto_snezna_odeja_max_cm  leto_novi_sneg_skupaj_cm  leto_dni_s_snegom  leto_dni_nevihta  leto_dni_toca  leto_dni_viharni_veter  leto_st_mesecev
+0   1   01003A    2010-09         1899         6.832414              31.8             -21.2                   1555.1              4.267395                  152.0                      70.0                     283.0               34.0              27.0            0.0                     0.0             12.0
+1   1   01003A    2010-10         1899         6.728651              31.8             -21.2                   1582.0              4.339706                  155.0                      70.0                     298.0               35.0              27.0            0.0                     0.0             12.0
+2   1   01003A    2010-11         1899         6.687061              31.8             -21.2                   1814.9              4.979793                  164.0                      70.0                     381.0               38.0              27.0            0.0                     0.0             12.0
+
+Stolpci:
+['ggo', 'odsek_id', 'leto_mesec', 'used_station', 'leto_povp_T_avg', 'leto_max_T_mesec', 'leto_min_T_mesec', 'leto_padavine_skupaj_mm', 'leto_padavine_avg_mm', 'leto_dni_s_padavinami', 'leto_snezna_odeja_max_cm', 'leto_novi_sneg_skupaj_cm', 'leto_dni_s_snegom', 'leto_dni_nevihta', 'leto_dni_toca', 'leto_dni_viharni_veter', 'leto_st_mesecev']
+21:21:41  INFO        [agg_posek_meritve] 4,108,855 rows × 17 cols
+21:21:41  INFO        [agg_posek_sosedi] joining posek with neighbour posek features...
+Gradim seznam sosedov: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/najblizji_odseki_postaje.csv
+  Skupaj robov (odsek → sosed): 3,546,918
+  Unikatnih [ggo, odsek_id] v izhodišču: 53,253
+
+Berem posek: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/posek_processed.csv
+  Vrstice: 4,108,855  |  Odseki: 25,691  |  Meseci: 228
+
+Agregiram 228 mesecev × 53,253 [ggo, odsek_id]...
+  Meseci: 0/228
+  Meseci: 11/228
+  Meseci: 22/228
+  Meseci: 33/228
+  Meseci: 44/228
+  Meseci: 55/228
+  Meseci: 66/228
+  Meseci: 77/228
+  Meseci: 88/228
+  Meseci: 99/228
+  Meseci: 110/228
+  Meseci: 121/228
+  Meseci: 132/228
+  Meseci: 143/228
+  Meseci: 154/228
+  Meseci: 165/228
+  Meseci: 176/228
+  Meseci: 187/228
+  Meseci: 198/228
+  Meseci: 209/228
+  Meseci: 220/228
+
+Združujem rezultate...
+
+Shranjeno: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/agg_posek_sosedi.csv
+  Vrstice: 12,141,684  |  Stolpci: 21
+
+Primer (prve 3 vrstice z vrednostmi):
+   ggo odsek_id leto_mesec  sosedi_target_sum  sosedi_target_mean  sosedi_target_std  sosedi_target_median  sosedi_log1p_target_mean  sosedi_lag_1_sum  sosedi_lag_1_mean  sosedi_lag_3_sum  sosedi_lag_3_mean  sosedi_lag_6_sum  sosedi_lag_6_mean  sosedi_lag_12_sum  sosedi_lag_12_mean  sosedi_rolling_mean_3_mean  sosedi_rolling_mean_6_mean  sosedi_rolling_mean_12_mean  sosedi_rolling_std_12_mean  sosedi_st_sosedov
+0    1   01001A    2007-01              22.73               22.73                NaN                 22.73                  3.166740               NaN                NaN               NaN                NaN               NaN                NaN                NaN                 NaN                         NaN                         NaN                     1.601988                    3.203976                  1
+44   1   01001A    2010-09               5.62                5.62                NaN                  5.62                  1.890095               NaN                NaN               NaN                NaN               NaN                NaN                NaN                 NaN                         NaN                         NaN                          NaN                         NaN                  1
+45   1   01001A    2010-10               0.00                0.00                NaN                  0.00                  0.000000          1.890095           1.890095               NaN                NaN               NaN                NaN                NaN                 NaN                    1.890095                    1.890095                     1.890095                         NaN                  1
+
+Stolpci:
+['ggo', 'odsek_id', 'leto_mesec', 'sosedi_target_sum', 'sosedi_target_mean', 'sosedi_target_std', 'sosedi_target_median', 'sosedi_log1p_target_mean', 'sosedi_lag_1_sum', 'sosedi_lag_1_mean', 'sosedi_lag_3_sum', 'sosedi_lag_3_mean', 'sosedi_lag_6_sum', 'sosedi_lag_6_mean', 'sosedi_lag_12_sum', 'sosedi_lag_12_mean', 'sosedi_rolling_mean_3_mean', 'sosedi_rolling_mean_6_mean', 'sosedi_rolling_mean_12_mean', 'sosedi_rolling_std_12_mean', 'sosedi_st_sosedov']
+21:27:17  INFO        [agg_posek_sosedi] 12,141,684 rows × 21 cols
+21:27:17  INFO        [agg_sestoji_odseke] joining odseki with aggregated sestoji...
+Berem odseki: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/odseki_processed.csv
+  Vrstice: 53,254  |  Unikatnih [ggo, odsek]: 53,254
+
+Berem sestoji: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/sestoji_processed.csv
+  Vrstice: 350,593  |  Unikatnih [ggo, odsek]: 53,254
+
+Agregiram sestoji po odsek...
+  lz/povrsina (sum):     16 cols
+  Numeric full agg:      37 cols
+  Boolean/one-hot (mean):0 cols
+  Rezultat: 53,254 vrstic  |  204 stolpcev
+
+Združujem odseki z agregiranimi sestoji...
+  Skupaj vrstic: 53,254  |  Stolpcev: 265
+  [ggo, odsek] z vsaj enim sestojem: 53,254 / 53,254 (100.0%)
+
+Shranjeno: /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/processed/agg_odseki_sestoji.csv
+  Vrstice: 53,254  |  Stolpci: 265
+
+Primer (prva vrstica):
+                                 0
+ggo                              9
+odsek_id                     31001
+povrsina                     16.57
+nagib                           20
+nvod                           820
+nvdo                           910
+tarifa_sm                       52
+tarifa_je                       52
+tarifa_oi                       50
+tarifa_bu                       52
+tarifa_hr                       50
+tarifa_pl                       52
+tarifa_tl                       48
+tarifa_ml                       48
+razdalja                       150
+odprtost                        80
+grt1                           632
+carb_tot_t                   162.5
+ponor_c                       10.9
+katgozd_1                        1
+katgozd_2                        0
+katgozd_3                        0
+katgozd_4                        0
+ohranjen_1                       0
+ohranjen_2                       0
+ohranjen_3                       1
+ohranjen_4                       0
+relief_1                         1
+relief_2                         0
+relief_3                         0
+relief_4                         0
+relief_5                         0
+relief_6                         0
+relief_7                         0
+relief_8                         0
+relief_9                         0
+spravilo_                        0
+spravilo_1                       1
+spravilo_2                       0
+spravilo_3                       0
+spravilo_4                       0
+spravilo_5                       0
+pozar_                           0
+pozar_1                          0
+pozar_2                          0
+pozar_3                          1
+pozar_4                          0
+intgosp_0                        0
+intgosp_1                        0
+intgosp_2                        0
+intgosp_3                        0
+intgosp_4                        1
+intgosp_5                        0
+rk_gurs_1                        0
+rk_gurs_3                        0
+rk_gurs_5                        0
+rk_gurs_7                        0
+rk_gurs_8                        0
+rk_gurs_9                        1
+rk_gurs_11                       0
+rk_gurs_13                       0
+rk_gurs_15                       0
+rk_gurs_17                       0
+sestoji_count                    6
+sestoji_povrsina_sum         16.59
+sestoji_lzskdv11_sum        185.68
+sestoji_lzskdv11_m_sum      205.93
+sestoji_lzskdv21_sum           0.0
+sestoji_lzskdv21_m_sum         0.0
+sestoji_lzskdv30_sum           0.0
+sestoji_lzskdv34_sum           0.0
+sestoji_lzskdv39_sum           0.0
+sestoji_lzskdv41_sum         94.37
+sestoji_lzskdv50_sum           0.0
+sestoji_lzskdv60_sum        109.72
+sestoji_lzskdv70_sum          4.13
+sestoji_lzskdv80_sum          6.11
+sestoji_lzigl_sum           4830.0
+sestoji_lzlst_sum           2081.0
+sestoji_lzsku_sum           6911.0
+sestoji_pompov_sum            4.11
+sestoji_etigl_sum              899
+sestoji_etlst_sum              487
+sestoji_etsku_sum             1386
+sestoji_rfaza_1_sum              2
+sestoji_rfaza_10_sum             0
+sestoji_rfaza_11_sum             0
+sestoji_rfaza_2_sum              1
+sestoji_rfaza_3_sum              2
+sestoji_rfaza_4_sum              1
+sestoji_rfaza_5_sum              0
+sestoji_rfaza_6_sum              0
+sestoji_rfaza_7_sum              0
+sestoji_rfaza_8_sum              0
+sestoji_rfaza_9_sum              0
+sestoji_sklep_ _sum              0
+sestoji_sklep_1_sum              3
+sestoji_sklep_2_sum              2
+sestoji_sklep_3_sum              1
+sestoji_sklep_4_sum              0
+sestoji_sklep_5_sum              0
+sestoji_zasnova_ _sum            3
+sestoji_zasnova_1_sum            0
+sestoji_zasnova_2_sum            3
+sestoji_zasnova_3_sum            0
+sestoji_zasnova_4_sum            0
+sestoji_negovan_ _sum            0
+sestoji_negovan_1_sum            1
+sestoji_negovan_2_sum            5
+sestoji_negovan_3_sum            0
+sestoji_negovan_4_sum            0
+sestoji_pomzas_0_sum             1
+sestoji_pomzas_1_sum             0
+sestoji_pomzas_2_sum             5
+sestoji_pomzas_3_sum             0
+sestoji_pomzas_4_sum             0
+sestoji_pomzas_5_sum             0
+sestoji_pompov_mean          0.685
+sestoji_etigl_mean      149.833333
+sestoji_etlst_mean       81.166667
+sestoji_etsku_mean           231.0
+sestoji_rfaza_1_mean      0.333333
+sestoji_rfaza_10_mean          0.0
+sestoji_rfaza_11_mean          0.0
+sestoji_rfaza_2_mean      0.166667
+sestoji_rfaza_3_mean      0.333333
+sestoji_rfaza_4_mean      0.166667
+sestoji_rfaza_5_mean           0.0
+sestoji_rfaza_6_mean           0.0
+sestoji_rfaza_7_mean           0.0
+sestoji_rfaza_8_mean           0.0
+sestoji_rfaza_9_mean           0.0
+sestoji_sklep_ _mean           0.0
+sestoji_sklep_1_mean           0.5
+sestoji_sklep_2_mean      0.333333
+sestoji_sklep_3_mean      0.166667
+sestoji_sklep_4_mean           0.0
+sestoji_sklep_5_mean           0.0
+sestoji_zasnova_ _mean         0.5
+sestoji_zasnova_1_mean         0.0
+sestoji_zasnova_2_mean         0.5
+sestoji_zasnova_3_mean         0.0
+sestoji_zasnova_4_mean         0.0
+sestoji_negovan_ _mean         0.0
+sestoji_negovan_1_mean    0.166667
+sestoji_negovan_2_mean    0.833333
+sestoji_negovan_3_mean         0.0
+sestoji_negovan_4_mean         0.0
+sestoji_pomzas_0_mean     0.166667
+sestoji_pomzas_1_mean          0.0
+sestoji_pomzas_2_mean     0.833333
+sestoji_pomzas_3_mean          0.0
+sestoji_pomzas_4_mean          0.0
+sestoji_pomzas_5_mean          0.0
+sestoji_pompov_std        0.484716
+sestoji_etigl_std       235.437819
+sestoji_etlst_std        91.392378
+sestoji_etsku_std       262.498762
+sestoji_rfaza_1_std       0.516398
+sestoji_rfaza_10_std           0.0
+sestoji_rfaza_11_std           0.0
+sestoji_rfaza_2_std       0.408248
+sestoji_rfaza_3_std       0.516398
+sestoji_rfaza_4_std       0.408248
+sestoji_rfaza_5_std            0.0
+sestoji_rfaza_6_std            0.0
+sestoji_rfaza_7_std            0.0
+sestoji_rfaza_8_std            0.0
+sestoji_rfaza_9_std            0.0
+sestoji_sklep_ _std            0.0
+sestoji_sklep_1_std       0.547723
+sestoji_sklep_2_std       0.516398
+sestoji_sklep_3_std       0.408248
+sestoji_sklep_4_std            0.0
+sestoji_sklep_5_std            0.0
+sestoji_zasnova_ _std     0.547723
+sestoji_zasnova_1_std          0.0
+sestoji_zasnova_2_std     0.547723
+sestoji_zasnova_3_std          0.0
+sestoji_zasnova_4_std          0.0
+sestoji_negovan_ _std          0.0
+sestoji_negovan_1_std     0.408248
+sestoji_negovan_2_std     0.408248
+sestoji_negovan_3_std          0.0
+sestoji_negovan_4_std          0.0
+sestoji_pomzas_0_std      0.408248
+sestoji_pomzas_1_std           0.0
+sestoji_pomzas_2_std      0.408248
+sestoji_pomzas_3_std           0.0
+sestoji_pomzas_4_std           0.0
+sestoji_pomzas_5_std           0.0
+sestoji_pompov_min             0.0
+sestoji_etigl_min                0
+sestoji_etlst_min                0
+sestoji_etsku_min                0
+sestoji_rfaza_1_min              0
+sestoji_rfaza_10_min             0
+sestoji_rfaza_11_min             0
+sestoji_rfaza_2_min              0
+sestoji_rfaza_3_min              0
+sestoji_rfaza_4_min              0
+sestoji_rfaza_5_min              0
+sestoji_rfaza_6_min              0
+sestoji_rfaza_7_min              0
+sestoji_rfaza_8_min              0
+sestoji_rfaza_9_min              0
+sestoji_sklep_ _min              0
+sestoji_sklep_1_min              0
+sestoji_sklep_2_min              0
+sestoji_sklep_3_min              0
+sestoji_sklep_4_min              0
+sestoji_sklep_5_min              0
+sestoji_zasnova_ _min            0
+sestoji_zasnova_1_min            0
+sestoji_zasnova_2_min            0
+sestoji_zasnova_3_min            0
+sestoji_zasnova_4_min            0
+sestoji_negovan_ _min            0
+sestoji_negovan_1_min            0
+sestoji_negovan_2_min            0
+sestoji_negovan_3_min            0
+sestoji_negovan_4_min            0
+sestoji_pomzas_0_min             0
+sestoji_pomzas_1_min             0
+sestoji_pomzas_2_min             0
+sestoji_pomzas_3_min             0
+sestoji_pomzas_4_min             0
+sestoji_pomzas_5_min             0
+sestoji_pompov_max            1.26
+sestoji_etigl_max              593
+sestoji_etlst_max              217
+sestoji_etsku_max              648
+sestoji_rfaza_1_max              1
+sestoji_rfaza_10_max             0
+sestoji_rfaza_11_max             0
+sestoji_rfaza_2_max              1
+sestoji_rfaza_3_max              1
+sestoji_rfaza_4_max              1
+sestoji_rfaza_5_max              0
+sestoji_rfaza_6_max              0
+sestoji_rfaza_7_max              0
+sestoji_rfaza_8_max              0
+sestoji_rfaza_9_max              0
+sestoji_sklep_ _max              0
+sestoji_sklep_1_max              1
+sestoji_sklep_2_max              1
+sestoji_sklep_3_max              1
+sestoji_sklep_4_max              0
+sestoji_sklep_5_max              0
+sestoji_zasnova_ _max            1
+sestoji_zasnova_1_max            0
+sestoji_zasnova_2_max            1
+sestoji_zasnova_3_max            0
+sestoji_zasnova_4_max            0
+sestoji_negovan_ _max            0
+sestoji_negovan_1_max            1
+sestoji_negovan_2_max            1
+sestoji_negovan_3_max            0
+sestoji_negovan_4_max            0
+sestoji_pomzas_0_max             1
+sestoji_pomzas_1_max             0
+sestoji_pomzas_2_max             1
+sestoji_pomzas_3_max             0
+sestoji_pomzas_4_max             0
+sestoji_pomzas_5_max             0
+
+Stolpci:
+['ggo', 'odsek_id', 'povrsina', 'nagib', 'nvod', 'nvdo', 'tarifa_sm', 'tarifa_je', 'tarifa_oi', 'tarifa_bu', 'tarifa_hr', 'tarifa_pl', 'tarifa_tl', 'tarifa_ml', 'razdalja', 'odprtost', 'grt1', 'carb_tot_t', 'ponor_c', 'katgozd_1', 'katgozd_2', 'katgozd_3', 'katgozd_4', 'ohranjen_1', 'ohranjen_2', 'ohranjen_3', 'ohranjen_4', 'relief_1 ', 'relief_2 ', 'relief_3 ', 'relief_4 ', 'relief_5 ', 'relief_6 ', 'relief_7 ', 'relief_8 ', 'relief_9 ', 'spravilo_ ', 'spravilo_1', 'spravilo_2', 'spravilo_3', 'spravilo_4', 'spravilo_5', 'pozar_ ', 'pozar_1', 'pozar_2', 'pozar_3', 'pozar_4', 'intgosp_0', 'intgosp_1', 'intgosp_2', 'intgosp_3', 'intgosp_4', 'intgosp_5', 'rk_gurs_1', 'rk_gurs_3', 'rk_gurs_5', 'rk_gurs_7', 'rk_gurs_8', 'rk_gurs_9', 'rk_gurs_11', 'rk_gurs_13', 'rk_gurs_15', 'rk_gurs_17', 'sestoji_count', 'sestoji_povrsina_sum', 'sestoji_lzskdv11_sum', 'sestoji_lzskdv11_m_sum', 'sestoji_lzskdv21_sum', 'sestoji_lzskdv21_m_sum', 'sestoji_lzskdv30_sum', 'sestoji_lzskdv34_sum', 'sestoji_lzskdv39_sum', 'sestoji_lzskdv41_sum', 'sestoji_lzskdv50_sum', 'sestoji_lzskdv60_sum', 'sestoji_lzskdv70_sum', 'sestoji_lzskdv80_sum', 'sestoji_lzigl_sum', 'sestoji_lzlst_sum', 'sestoji_lzsku_sum', 'sestoji_pompov_sum', 'sestoji_etigl_sum', 'sestoji_etlst_sum', 'sestoji_etsku_sum', 'sestoji_rfaza_1_sum', 'sestoji_rfaza_10_sum', 'sestoji_rfaza_11_sum', 'sestoji_rfaza_2_sum', 'sestoji_rfaza_3_sum', 'sestoji_rfaza_4_sum', 'sestoji_rfaza_5_sum', 'sestoji_rfaza_6_sum', 'sestoji_rfaza_7_sum', 'sestoji_rfaza_8_sum', 'sestoji_rfaza_9_sum', 'sestoji_sklep_ _sum', 'sestoji_sklep_1_sum', 'sestoji_sklep_2_sum', 'sestoji_sklep_3_sum', 'sestoji_sklep_4_sum', 'sestoji_sklep_5_sum', 'sestoji_zasnova_ _sum', 'sestoji_zasnova_1_sum', 'sestoji_zasnova_2_sum', 'sestoji_zasnova_3_sum', 'sestoji_zasnova_4_sum', 'sestoji_negovan_ _sum', 'sestoji_negovan_1_sum', 'sestoji_negovan_2_sum', 'sestoji_negovan_3_sum', 'sestoji_negovan_4_sum', 'sestoji_pomzas_0_sum', 'sestoji_pomzas_1_sum', 'sestoji_pomzas_2_sum', 'sestoji_pomzas_3_sum', 'sestoji_pomzas_4_sum', 'sestoji_pomzas_5_sum', 'sestoji_pompov_mean', 'sestoji_etigl_mean', 'sestoji_etlst_mean', 'sestoji_etsku_mean', 'sestoji_rfaza_1_mean', 'sestoji_rfaza_10_mean', 'sestoji_rfaza_11_mean', 'sestoji_rfaza_2_mean', 'sestoji_rfaza_3_mean', 'sestoji_rfaza_4_mean', 'sestoji_rfaza_5_mean', 'sestoji_rfaza_6_mean', 'sestoji_rfaza_7_mean', 'sestoji_rfaza_8_mean', 'sestoji_rfaza_9_mean', 'sestoji_sklep_ _mean', 'sestoji_sklep_1_mean', 'sestoji_sklep_2_mean', 'sestoji_sklep_3_mean', 'sestoji_sklep_4_mean', 'sestoji_sklep_5_mean', 'sestoji_zasnova_ _mean', 'sestoji_zasnova_1_mean', 'sestoji_zasnova_2_mean', 'sestoji_zasnova_3_mean', 'sestoji_zasnova_4_mean', 'sestoji_negovan_ _mean', 'sestoji_negovan_1_mean', 'sestoji_negovan_2_mean', 'sestoji_negovan_3_mean', 'sestoji_negovan_4_mean', 'sestoji_pomzas_0_mean', 'sestoji_pomzas_1_mean', 'sestoji_pomzas_2_mean', 'sestoji_pomzas_3_mean', 'sestoji_pomzas_4_mean', 'sestoji_pomzas_5_mean', 'sestoji_pompov_std', 'sestoji_etigl_std', 'sestoji_etlst_std', 'sestoji_etsku_std', 'sestoji_rfaza_1_std', 'sestoji_rfaza_10_std', 'sestoji_rfaza_11_std', 'sestoji_rfaza_2_std', 'sestoji_rfaza_3_std', 'sestoji_rfaza_4_std', 'sestoji_rfaza_5_std', 'sestoji_rfaza_6_std', 'sestoji_rfaza_7_std', 'sestoji_rfaza_8_std', 'sestoji_rfaza_9_std', 'sestoji_sklep_ _std', 'sestoji_sklep_1_std', 'sestoji_sklep_2_std', 'sestoji_sklep_3_std', 'sestoji_sklep_4_std', 'sestoji_sklep_5_std', 'sestoji_zasnova_ _std', 'sestoji_zasnova_1_std', 'sestoji_zasnova_2_std', 'sestoji_zasnova_3_std', 'sestoji_zasnova_4_std', 'sestoji_negovan_ _std', 'sestoji_negovan_1_std', 'sestoji_negovan_2_std', 'sestoji_negovan_3_std', 'sestoji_negovan_4_std', 'sestoji_pomzas_0_std', 'sestoji_pomzas_1_std', 'sestoji_pomzas_2_std', 'sestoji_pomzas_3_std', 'sestoji_pomzas_4_std', 'sestoji_pomzas_5_std', 'sestoji_pompov_min', 'sestoji_etigl_min', 'sestoji_etlst_min', 'sestoji_etsku_min', 'sestoji_rfaza_1_min', 'sestoji_rfaza_10_min', 'sestoji_rfaza_11_min', 'sestoji_rfaza_2_min', 'sestoji_rfaza_3_min', 'sestoji_rfaza_4_min', 'sestoji_rfaza_5_min', 'sestoji_rfaza_6_min', 'sestoji_rfaza_7_min', 'sestoji_rfaza_8_min', 'sestoji_rfaza_9_min', 'sestoji_sklep_ _min', 'sestoji_sklep_1_min', 'sestoji_sklep_2_min', 'sestoji_sklep_3_min', 'sestoji_sklep_4_min', 'sestoji_sklep_5_min', 'sestoji_zasnova_ _min', 'sestoji_zasnova_1_min', 'sestoji_zasnova_2_min', 'sestoji_zasnova_3_min', 'sestoji_zasnova_4_min', 'sestoji_negovan_ _min', 'sestoji_negovan_1_min', 'sestoji_negovan_2_min', 'sestoji_negovan_3_min', 'sestoji_negovan_4_min', 'sestoji_pomzas_0_min', 'sestoji_pomzas_1_min', 'sestoji_pomzas_2_min', 'sestoji_pomzas_3_min', 'sestoji_pomzas_4_min', 'sestoji_pomzas_5_min', 'sestoji_pompov_max', 'sestoji_etigl_max', 'sestoji_etlst_max', 'sestoji_etsku_max', 'sestoji_rfaza_1_max', 'sestoji_rfaza_10_max', 'sestoji_rfaza_11_max', 'sestoji_rfaza_2_max', 'sestoji_rfaza_3_max', 'sestoji_rfaza_4_max', 'sestoji_rfaza_5_max', 'sestoji_rfaza_6_max', 'sestoji_rfaza_7_max', 'sestoji_rfaza_8_max', 'sestoji_rfaza_9_max', 'sestoji_sklep_ _max', 'sestoji_sklep_1_max', 'sestoji_sklep_2_max', 'sestoji_sklep_3_max', 'sestoji_sklep_4_max', 'sestoji_sklep_5_max', 'sestoji_zasnova_ _max', 'sestoji_zasnova_1_max', 'sestoji_zasnova_2_max', 'sestoji_zasnova_3_max', 'sestoji_zasnova_4_max', 'sestoji_negovan_ _max', 'sestoji_negovan_1_max', 'sestoji_negovan_2_max', 'sestoji_negovan_3_max', 'sestoji_negovan_4_max', 'sestoji_pomzas_0_max', 'sestoji_pomzas_1_max', 'sestoji_pomzas_2_max', 'sestoji_pomzas_3_max', 'sestoji_pomzas_4_max', 'sestoji_pomzas_5_max']
+21:27:24  INFO        [agg_sestoji_odseke] 53,254 rows × 265 cols
+21:27:24  INFO      === Step 3: Joining datasets ===
+21:27:24  INFO        after weather join:   4,108,855 rows × 35 cols
+21:27:25  INFO        after neighbour join: 4,108,855 rows × 53 cols
+21:27:26  INFO        after odseki join:    4,108,855 rows × 316 cols
+21:27:27  INFO        final dataset: 4,108,855 rows × 316 cols
+21:27:27  INFO      === Step 4: Splitting and exporting ===
+21:27:27  INFO        split config: train < 2020 | val 2020–2021 | test >= 2022
+21:27:40  INFO        train : 2,841,121 rows → /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/train.csv
+21:27:40  INFO        val   : 531,636 rows → /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/val.csv
+21:27:40  INFO        test  : 736,098 rows → /d/hpc/home/hackathon08/BarkWatch-arnes_hackathon2026/data/test.csv
+21:27:40  INFO      Pipeline complete.
+[21:27:40] Creating shortened CSV files ...
+  Saved data/processed/splits/train_short.csv (100 rows)
+  Saved data/processed/splits/val_short.csv (100 rows)
+  Saved data/processed/splits/test_short.csv (100 rows)
+[21:27:40] Staging full splits for training/testing ...
+[21:27:43] Running train.py ...
+Loading train / val …
