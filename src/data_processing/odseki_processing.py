@@ -37,7 +37,6 @@ COLUMNS_TO_KEEP = [
 ]
 
 ONEHOT_COLUMNS = [
-    'ggo',
     'katgozd',
     'ohranjen',
     'relief',

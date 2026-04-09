@@ -48,9 +48,27 @@ MODEL_PATH = MODELS_DIR / "xgb_models.pkl"
 # ---------------------------------------------------------------------------
 # Columns
 # ---------------------------------------------------------------------------
-INDEX_COLS  = ["odsek", "leto_mesec"]
+INDEX_COLS  = ["ggo", "odsek", "leto_mesec"]
 DROP_COLS   = ["datum"]
 TARGET_COLS = [f"h{h}" for h in range(1, 13)]
+
+
+def _resolve_split_paths() -> tuple[Path, Path]:
+    """Prefer top-level data/*.csv (dummy workflow), fallback to processed splits."""
+    train_top = ROOT / "data" / "train.csv"
+    val_top = ROOT / "data" / "val.csv"
+    if train_top.exists() and val_top.exists():
+        return train_top, val_top
+    return SPLITS_DIR / "train.csv", SPLITS_DIR / "val.csv"
+
+
+def _present_index_cols(df: pd.DataFrame) -> list[str]:
+    cols = [c for c in INDEX_COLS if c in df.columns]
+    required = {"odsek", "leto_mesec"}
+    if not required.issubset(set(cols)):
+        missing = ", ".join(sorted(required - set(cols)))
+        raise ValueError(f"Missing required identifier columns: {missing}")
+    return cols
 
 # ---------------------------------------------------------------------------
 # Shared XGBoost parameters
@@ -85,12 +103,14 @@ REG_PARAMS = dict(
 # 1. Load
 # ---------------------------------------------------------------------------
 print("Loading train / val …")
-train_df = pd.read_csv(SPLITS_DIR / "train.csv")
-val_df   = pd.read_csv(SPLITS_DIR / "val.csv")
+train_path, val_path = _resolve_split_paths()
+train_df = pd.read_csv(train_path)
+val_df   = pd.read_csv(val_path)
+present_index_cols = _present_index_cols(train_df)
 
 
 def split_xy(df: pd.DataFrame):
-    df = df.drop(columns=DROP_COLS + INDEX_COLS, errors="ignore")
+    df = df.drop(columns=DROP_COLS + present_index_cols, errors="ignore")
     df = df.dropna()
     X = df.drop(columns=TARGET_COLS)
     y = df[TARGET_COLS]

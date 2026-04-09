@@ -1,14 +1,14 @@
 """
 agg_posek_vreme.py
 ------------------
-Za vsak posek iz posek_processed.csv pripiše agregirane vremenske značilke
+Za vsak [ggo, posek] iz posek_processed.csv pripiše agregirane vremenske značilke
 iz najbližje ARSO postaje za zadnje leto (12 mesecev do vključno meseca poseka).
 
 Vhod:
   - data/processed/posek_processed.csv
       Vsebuje vse poseke z atributi + stolpci leto in mesec poseka.
   - data/processed/najblizji_odseki_postaje.csv
-      Za vsak odsek_id najbližja postaja tipa 123 (padavine) in tipa 23
+      Za vsak [ggo, odsek_id] najbližja postaja tipa 123 (padavine) in tipa 23
       (temp + padavine) za vsako leto med 2006 in 2026.
   - data/processed/vreme_mesecno.csv
       Mesečni vremenski povzetki po postajah.
@@ -25,6 +25,10 @@ warnings.filterwarnings("ignore")
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import polars as pl
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -59,15 +63,16 @@ AGG_COLS = {
 # ---------------------------------------------------------------------------
 
 def load_postaje_long(path: Path) -> pd.DataFrame:
-    """Naloži najblizji_odseki_postaje in vrni dolgo obliko: odsek_id | year | station_23 | station_123."""
+    """Naloži najblizji_odseki_postaje in vrni dolgo obliko: ggo | odsek_id | year | station_23 | station_123."""
     df = pd.read_csv(path, low_memory=False)
+    df["ggo"] = df["ggo"].astype(str)
     df["odsek_id"] = df["odsek_id"].astype(str)
 
     rows = []
     for year in YEARS:
         col_23  = f"station_23_{year}"
         col_123 = f"station_123_{year}"
-        tmp = df[["odsek_id"]].copy()
+        tmp = df[["ggo", "odsek_id"]].copy()
         tmp["year"] = year
         tmp["station_23"]  = df[col_23].astype(str)  if col_23  in df.columns else np.nan
         tmp["station_123"] = df[col_123].astype(str) if col_123 in df.columns else np.nan
@@ -143,10 +148,14 @@ def main():
     # 1. Naloži poseke
     print(f"Berem poseke: {POSEK_IN}")
     posek = pd.read_csv(POSEK_IN, low_memory=False)
+    posek["ggo"]       = posek["ggo"].astype(str).str.strip()
     posek["odsek"]     = posek["odsek"].astype(str).str.strip()
     posek["leto"]      = posek["leto"].astype(int)
     posek["leto_mesec"] = posek["leto_mesec"].astype(str).str.strip()
-    print(f"  Poseki: {len(posek):,}  |  Odseki: {posek['odsek'].nunique():,}")
+    print(
+        f"  Poseki: {len(posek):,}  |  "
+        f"Unikatnih [ggo, odsek]: {posek[['ggo', 'odsek']].drop_duplicates().shape[0]:,}"
+    )
 
     # 2. Naloži postaje (dolga oblika)
     print(f"\nBerem postaje: {POSTAJE_IN}")
@@ -167,13 +176,13 @@ def main():
     print(f"  Predizračunane vrstice: {len(station_feats_idx):,}")
 
     # 4. Za vsak posek poišči pravo postajo (leto poseka → station_23 ali station_123)
-    #    Spoji posek z postaje_long na (odsek == odsek_id, leto == year)
+    #    Spoji posek z postaje_long na (ggo, odsek == odsek_id, leto == year)
     print("\nIščem postaje za poseke...")
     posek["_year"] = posek["leto"].clip(min(YEARS), max(YEARS))
 
     merged = posek.merge(
         postaje_long.rename(columns={"odsek_id": "odsek", "year": "_year"}),
-        on=["odsek", "_year"],
+        on=["ggo", "odsek", "_year"],
         how="left",
     )
     print(f"  Poseki z najdeno postajo v tabeli: {merged['station_23'].notna().sum():,} / {len(merged):,}")
@@ -215,8 +224,8 @@ def main():
     feat_values = key_to_feats.loc[merged.loc[found, "_key"]]
     feat_values.index = merged.loc[found].index
 
-    # Sestavi izhod: samo ključ [odsek_id, leto_mesec] + used_station + vremenske značilke
-    output = merged[["odsek", "leto_mesec", "used_station"]].copy()
+    # Sestavi izhod: samo ključ [ggo, odsek_id, leto_mesec] + used_station + vremenske značilke
+    output = merged[["ggo", "odsek", "leto_mesec", "used_station"]].copy()
     output = output.rename(columns={"odsek": "odsek_id"})
     for col in feat_cols:
         output[col] = np.nan

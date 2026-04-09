@@ -1,24 +1,24 @@
 """
 agg_posek_sosedi.py
 -------------------
-Za vsak odsek in mesec izračuna agregirane značilke poseka iz sosednjih
+Za vsak [ggo, odsek] in mesec izračuna agregirane značilke poseka iz sosednjih
 odseki (v razdalji 1 km od središča odseka).
 
 Vhod:
   - data/processed/najblizji_odseki_postaje.csv
-      Vsebuje za vsak odsek_id seznam bližnjih odseki (bliznji_odseki, ločeni
+      Vsebuje za vsak [ggo, odsek_id] seznam bližnjih odseki (bliznji_odseki, ločeni
       s podpičjem).
   - data/processed/posek_processed.csv
       Mesečni posek po odsekih: target, lagi, drsečia povprečja, itd.
 
 Izhod:
   - data/processed/agg_posek_sosedi.csv
-      Ključ: [odsek_id, leto_mesec]
+      Ključ: [ggo, odsek_id, leto_mesec]
       Stolpci: agregirane vrednosti poseka sosednjih odseki (vsota, povprečje,
                std, ...) za vsak mesec.
 
 Strategija agregacije:
-  - Za vsak mesec se za vsak odsek poiščejo sosednji odseki (iz bliznji_odseki)
+  - Za vsak mesec se za vsak [ggo, odsek] poiščejo sosednji odseki (iz bliznji_odseki)
     in se iz posek_processed pridobijo njihove vrednosti za ta mesec.
   - Iz teh vrednosti se izračunajo: vsota (skupna intenzivnost v okolici),
     povprečje, std, mediana in število sosedov s podatki.
@@ -56,7 +56,7 @@ AGG_SPEC = {
     "rolling_std_12":  ["mean"],
 }
 
-POSEK_COLS = ["odsek", "leto_mesec"] + list(AGG_SPEC.keys())
+POSEK_COLS = ["ggo", "odsek", "leto_mesec"] + list(AGG_SPEC.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +75,11 @@ def _progress(iterable, desc: str = "", total: int | None = None):
 def build_edge_list(postaje_path: Path) -> pd.DataFrame:
     """
     Parse bliznji_odseki column and return a long edge table:
-      odsek_id | neighbor_odsek
+      ggo | odsek_id | neighbor_odsek
     """
-    df = pd.read_csv(postaje_path, usecols=["odsek_id", "bliznji_odseki"],
+    df = pd.read_csv(postaje_path, usecols=["ggo", "odsek_id", "bliznji_odseki"],
                      low_memory=False)
+    df["ggo"] = df["ggo"].astype(str)
     df["odsek_id"] = df["odsek_id"].astype(str)
     df["bliznji_odseki"] = df["bliznji_odseki"].fillna("")
 
@@ -87,6 +88,7 @@ def build_edge_list(postaje_path: Path) -> pd.DataFrame:
     exploded = exploded.str.strip().replace("", np.nan).dropna()
 
     edges = pd.DataFrame({
+        "ggo":      df.loc[exploded.index, "ggo"].values,
         "odsek_id":      df.loc[exploded.index, "odsek_id"].values,
         "neighbor_odsek": exploded.values,
     })
@@ -104,7 +106,7 @@ def main():
     print(f"Gradim seznam sosedov: {POSTAJE_IN}")
     edges = build_edge_list(POSTAJE_IN)
     print(f"  Skupaj robov (odsek → sosed): {len(edges):,}")
-    print(f"  Unikatnih odseki v izhodišču: {edges['odsek_id'].nunique():,}")
+    print(f"  Unikatnih [ggo, odsek_id] v izhodišču: {edges[['ggo', 'odsek_id']].drop_duplicates().shape[0]:,}")
 
     # 2. Load posek_processed (only needed columns)
     print(f"\nBerem posek: {POSEK_IN}")
@@ -117,9 +119,10 @@ def main():
             print(f"  OPOZORILO: stolpec '{col}' ni v posek_processed, preskakujem.")
 
     posek = pd.read_csv(POSEK_IN, usecols=posek_cols_present, low_memory=False)
+    posek["ggo"] = posek["ggo"].astype(str)
     posek["odsek"] = posek["odsek"].astype(str)
 
-    numeric_cols = [c for c in posek_cols_present if c not in ("odsek", "leto_mesec")]
+    numeric_cols = [c for c in posek_cols_present if c not in ("ggo", "odsek", "leto_mesec")]
     for col in numeric_cols:
         posek[col] = pd.to_numeric(posek[col], errors="coerce")
 
@@ -143,7 +146,7 @@ def main():
     feat_cols.append("sosedi_st_sosedov")  # number of neighbors with data
 
     # 5. Process month by month
-    print(f"\nAgregiram {len(all_months)} mesecev × {edges['odsek_id'].nunique():,} odseki...")
+    print(f"\nAgregiram {len(all_months)} mesecev × {edges[['ggo', 'odsek_id']].drop_duplicates().shape[0]:,} [ggo, odsek_id]...")
 
     all_results = []
 
@@ -152,13 +155,16 @@ def main():
         if posek_m is None or posek_m.empty:
             continue
 
-        # Join: edges (odsek_id, neighbor_odsek) × posek_m (odsek, ...)
+        # Join: edges (ggo, odsek_id, neighbor_odsek) × posek_m (ggo, odsek, ...)
         joined = edges.merge(
-            posek_m, left_on="neighbor_odsek", right_on="odsek", how="left"
+            posek_m,
+            left_on=["ggo", "neighbor_odsek"],
+            right_on=["ggo", "odsek"],
+            how="left",
         ).drop(columns="odsek")
 
-        # Aggregate by odsek_id
-        grp = joined.groupby("odsek_id", sort=False)
+        # Aggregate by [ggo, odsek_id]
+        grp = joined.groupby(["ggo", "odsek_id"], sort=False)
 
         agg_parts = []
         for col, funcs in agg_funcs.items():
@@ -180,13 +186,13 @@ def main():
         agg_parts.append(count_s)
 
         month_df = pd.concat(agg_parts, axis=1).reset_index()
-        month_df.insert(1, "leto_mesec", leto_mesec)
+        month_df.insert(2, "leto_mesec", leto_mesec)
         all_results.append(month_df)
 
     # 6. Concatenate and save
     print("\nZdružujem rezultate...")
     result = pd.concat(all_results, ignore_index=True)
-    result = result.sort_values(["odsek_id", "leto_mesec"]).reset_index(drop=True)
+    result = result.sort_values(["ggo", "odsek_id", "leto_mesec"]).reset_index(drop=True)
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(OUT_PATH, index=False, float_format="%.4f")

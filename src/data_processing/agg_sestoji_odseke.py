@@ -3,7 +3,7 @@ agg_sestoji_odseke.py
 ---------------------
 Združi odseki_processed.csv in sestoji_processed.csv v eno tabelo.
 
-Sestoji so agregirani po 'odsek' s sledečo strategijo:
+Sestoji so agregirani po '[ggo, odsek]' s sledečo strategijo:
   - 'povrsina' in vsi stolpci z 'lz' predpono (lesne zaloge, deleži vrst):
       → SUM (skupna vrednost za odsek)
   - Ostali numerični stolpci (pompov, etigl, etlst, etsku):
@@ -13,11 +13,11 @@ Sestoji so agregirani po 'odsek' s sledečo strategijo:
   - Metapodatek: 'sestoji_count' (število sestoji na odsek)
 
 Vhod:
-  - data/processed/odseki_processed.csv   (primarni ključ: odsek)
+  - data/processed/odseki_processed.csv   (primarni ključ: [ggo, odsek])
   - data/processed/sestoji_processed.csv  (tuji ključ: odsek)
 
 Izhod:
-  - data/processed/agg_odseki_sestoji.csv (ključ: odsek_id)
+  - data/processed/agg_odseki_sestoji.csv (ključ: [ggo, odsek_id])
 """
 
 import warnings
@@ -74,16 +74,16 @@ def classify_columns(df: pd.DataFrame, key_cols: list[str]) -> dict[str, list[st
 
 def aggregate_sestoji(sestoji: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate sestoji_processed by 'odsek'.
-    Returns one row per unique odsek with prefixed columns.
+    Aggregate sestoji_processed by [ggo, 'odsek'].
+    Returns one row per unique [ggo, odsek] with prefixed columns.
     """
-    groups = classify_columns(sestoji, key_cols=["odsek", "sestoj"])
+    groups = classify_columns(sestoji, key_cols=["ggo", "odsek", "sestoj"])
 
     print(f"  lz/povrsina (sum):     {len(groups['lz_sum'])} cols")
     print(f"  Numeric full agg:      {len(groups['num_full'])} cols")
     print(f"  Boolean/one-hot (mean):{len(groups['bool_'])} cols")
 
-    grp = sestoji.groupby("odsek", sort=False)
+    grp = sestoji.groupby(["ggo", "odsek"], sort=False)
 
     parts = []
 
@@ -116,21 +116,21 @@ def aggregate_sestoji(sestoji: pd.DataFrame) -> pd.DataFrame:
     # 4. MEAN for boolean / one-hot columns (→ proportion of sestoji with that flag)
     if groups["bool_"]:
         # Cast bools to int first for mean
-        bool_df = sestoji[["odsek"] + groups["bool_"]].copy()
+        bool_df = sestoji[["ggo", "odsek"] + groups["bool_"]].copy()
         for col in groups["bool_"]:
             bool_df[col] = pd.to_numeric(bool_df[col], errors="coerce")
         bool_agg = (
-            bool_df.groupby("odsek", sort=False)[groups["bool_"]]
+            bool_df.groupby(["ggo", "odsek"], sort=False)[groups["bool_"]]
             .mean()
             .rename(columns={c: f"sestoji_{c}_mean" for c in groups["bool_"]})
             .reset_index()
         )
         parts.append(bool_agg)
 
-    # Merge all parts on 'odsek'
+    # Merge all parts on ['ggo', 'odsek']
     result = parts[0]
     for part in parts[1:]:
-        result = result.merge(part, on="odsek", how="left")
+        result = result.merge(part, on=["ggo", "odsek"], how="left")
 
     return result
 
@@ -143,20 +143,22 @@ def main():
     # 1. Load odseki_processed
     print(f"Berem odseki: {ODSEKI_IN}")
     odseki = pd.read_csv(ODSEKI_IN, low_memory=False)
+    odseki["ggo"] = odseki["ggo"].astype(str)
     odseki["odsek"] = odseki["odsek"].astype(str)
-    print(f"  Vrstice: {len(odseki):,}  |  Unikatnih odsek: {odseki['odsek'].nunique():,}")
+    print(f"  Vrstice: {len(odseki):,}  |  Unikatnih [ggo, odsek]: {odseki[['ggo', 'odsek']].drop_duplicates().shape[0]:,}")
 
-    # Deduplicate: keep first row per odsek (odsek is declared primary key)
+    # Deduplicate: keep first row per [ggo, odsek] (composite key)
     n_before = len(odseki)
-    odseki = odseki.drop_duplicates(subset="odsek", keep="first").reset_index(drop=True)
+    odseki = odseki.drop_duplicates(subset=["ggo", "odsek"], keep="first").reset_index(drop=True)
     if len(odseki) < n_before:
         print(f"  Odstranjenih duplikatov: {n_before - len(odseki):,}")
 
     # 2. Load sestoji_processed
     print(f"\nBerem sestoji: {SESTOJI_IN}")
     sestoji = pd.read_csv(SESTOJI_IN, low_memory=False)
+    sestoji["ggo"] = sestoji["ggo"].astype(str)
     sestoji["odsek"] = sestoji["odsek"].astype(str)
-    print(f"  Vrstice: {len(sestoji):,}  |  Unikatnih odsek: {sestoji['odsek'].nunique():,}")
+    print(f"  Vrstice: {len(sestoji):,}  |  Unikatnih [ggo, odsek]: {sestoji[['ggo', 'odsek']].drop_duplicates().shape[0]:,}")
 
     # Coerce numeric columns
     skip = {"odsek", "sestoj"}
@@ -173,15 +175,15 @@ def main():
 
     # 4. Join odseki + aggregated sestoji
     print("\nZdružujem odseki z agregiranimi sestoji...")
-    result = odseki.merge(sestoji_agg, on="odsek", how="left")
+    result = odseki.merge(sestoji_agg, on=["ggo", "odsek"], how="left")
     print(f"  Skupaj vrstic: {len(result):,}  |  Stolpcev: {len(result.columns)}")
 
     # Check coverage
     matched = result["sestoji_count"].notna().sum()
-    print(f"  Odseki z vsaj enim sestojem: {matched:,} / {len(result):,} "
+    print(f"  [ggo, odsek] z vsaj enim sestojem: {matched:,} / {len(result):,} "
           f"({100 * matched / len(result):.1f}%)")
 
-    # 5. Rename 'odsek' → 'odsek_id' for clarity
+    # 5. Rename 'odsek' → 'odsek_id' for clarity (but keep ggo)
     result = result.rename(columns={"odsek": "odsek_id"})
 
     # 6. Save

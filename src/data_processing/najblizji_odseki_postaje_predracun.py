@@ -3,7 +3,8 @@ Precompute nearest weather stations and nearest odseki for every odsek.
 
 Outputs: data/processed/najblizji_odseki_postaje.csv
 Columns:
-    odsek_id            – odsek identifier
+    ggo                 – odsek class (part of composite key [ggo, odsek_id])
+    odsek_id            – odsek identifier (part of composite key [ggo, odsek_id])
     station_123         – ID of nearest weather station (type 1, 2, or 3), all years
     station_23          – ID of nearest weather station (type 2 or 3), all years
     station_123_YYYY    – ID of nearest active station (type 1/2/3) for year YYYY
@@ -61,23 +62,24 @@ _TRANSFORMER = pyproj.Transformer.from_crs("EPSG:3794", "EPSG:4326", always_xy=T
 def _load_odseki_centroids() -> pd.DataFrame:
     """Load all odseki CSVs, compute WGS84 centroids and max border distance.
 
-    Returns DataFrame with columns: odsek (str), lon, lat, max_border_km.
+    Returns DataFrame with columns: ggo (str), odsek (str), lon, lat, max_border_km.
     max_border_km is the maximum distance from the centroid to any polygon
     vertex, in km (computed in EPSG:3794 metres)."""
     print("Loading odseki...")
     frames = []
     for path in _ODSEKI_FILES:
         if path.exists():
-            df = pd.read_csv(path, encoding="utf-8", usecols=["odsek", "geometry"])
+            df = pd.read_csv(path, encoding="utf-8", usecols=["ggo", "odsek", "geometry"])
             frames.append(df)
             print(f"  {path.name}: {len(df):,} rows")
         else:
             print(f"  {path.name}: NOT FOUND, skipping")
 
     df = pd.concat(frames, ignore_index=True)
+    df["ggo"] = df["ggo"].astype(str)
     df["odsek"] = df["odsek"].astype(str)
-    df = df.drop_duplicates(subset=["odsek"]).reset_index(drop=True)
-    print(f"  Total unique odseki: {len(df):,}")
+    df = df.drop_duplicates(subset=["ggo", "odsek"]).reset_index(drop=True)
+    print(f"  Total unique [ggo, odsek]: {len(df):,}")
 
     print("Computing centroids and max border distances...")
     geoms = df["geometry"].apply(wkt.loads)
@@ -202,7 +204,7 @@ def main(radius_km: float = DEFAULT_RADIUS_KM) -> None:
     odsek_df["bliznji_odseki"] = _bliznji_odseki_series(odsek_df, radius_km)
 
     year_cols = [c for y in YEARS for c in (f"station_123_{y}", f"station_23_{y}")]
-    out = odsek_df[["odsek", "station_123", "station_23"] + year_cols + ["bliznji_odseki"]].rename(
+    out = odsek_df[["ggo", "odsek", "station_123", "station_23"] + year_cols + ["bliznji_odseki"]].rename(
         columns={"odsek": "odsek_id"}
     )
 

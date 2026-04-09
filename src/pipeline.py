@@ -120,16 +120,26 @@ def step_aggregate():
     Sub-steps:
       a) najblizji_odseki_postaje – precompute nearest stations & neighbours
          (skipped when output file already exists)
-      b) agg_posek_meritve  – posek × weather  (key: odsek_id, leto_mesec)
-      c) agg_posek_sosedi   – posek × neighbour posek  (key: odsek_id, leto_mesec)
-      d) agg_sestoji_odseke – odseki × sestoji  (key: odsek_id)
+      b) agg_posek_meritve  – posek × weather  (key: [ggo, odsek_id, leto_mesec])
+      c) agg_posek_sosedi   – posek × neighbour posek  (key: [ggo, odsek_id, leto_mesec])
+      d) agg_sestoji_odseke – odseki × sestoji  (key: [ggo, odsek_id])
     """
     log.info("=== Step 2: Aggregating relationships ===")
 
     najblizji_out = PROCESSED_DIR / "najblizji_odseki_postaje.csv"
+    rebuild_najblizji = True
     if najblizji_out.exists():
-        log.info("  [najblizji] output already exists – skipping precomputation")
-    else:
+        try:
+            existing_cols = pl.read_csv(najblizji_out, n_rows=0).columns
+            if "ggo" in existing_cols:
+                rebuild_najblizji = False
+                log.info("  [najblizji] output already exists with ggo key – skipping precomputation")
+            else:
+                log.info("  [najblizji] existing output missing ggo key – recomputing")
+        except Exception:
+            log.info("  [najblizji] existing output unreadable – recomputing")
+
+    if rebuild_najblizji:
         log.info("  [najblizji] computing nearest stations & odsek neighbours "
                  "(this may take a while)...")
         najblizji_odseki_postaje_predracun.main()
@@ -167,28 +177,30 @@ def step_join(
     Left-join all aggregated tables onto the posek feature table.
 
     Join order:
-      posek  ×  agg_posek_meritve  on (odsek, leto_mesec)
-             ×  agg_posek_sosedi   on (odsek, leto_mesec)
-             ×  agg_odseki_sestoji on (odsek)             [static features]
+            posek  ×  agg_posek_meritve  on (ggo, odsek, leto_mesec)
+             ×  agg_posek_sosedi   on (ggo, odsek, leto_mesec)
+             ×  agg_odseki_sestoji on (ggo, odsek)        [static features]
     """
     log.info("=== Step 3: Joining datasets ===")
 
     base = posek_df
+    if "ggo" not in base.columns:
+        raise ValueError("posek_processed is missing 'ggo'; run updated posek_processing first.")
 
-    # agg tables use 'odsek_id' as their primary key; align with posek's 'odsek'
+    # agg tables use ['ggo', 'odsek_id'] as their composite key; align with posek's ['ggo', 'odsek']
     meritve_clean = agg_meritve_df.rename({"odsek_id": "odsek"})
     # drop 'used_station' — internal join-artifact, not a model feature
     if "used_station" in meritve_clean.columns:
         meritve_clean = meritve_clean.drop("used_station")
-    base = base.join(meritve_clean, on=["odsek", "leto_mesec"], how="left")
+    base = base.join(meritve_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
     log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     sosedi_clean = agg_sosedi_df.rename({"odsek_id": "odsek"})
-    base = base.join(sosedi_clean, on=["odsek", "leto_mesec"], how="left")
+    base = base.join(sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
     log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     sestoji_clean = agg_sestoji_df.rename({"odsek_id": "odsek"})
-    base = base.join(sestoji_clean, on="odsek", how="left", suffix="_odsek")
+    base = base.join(sestoji_clean, on=["ggo", "odsek"], how="left", suffix="_odsek")
     log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     # Fill nulls in numeric columns with 0; leave string/categorical as-is
@@ -221,7 +233,7 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
 
     Demo mode (--demo flag):
       Before splitting, the dataset is subsampled to DEMO_N_ODSEKI randomly
-      chosen odseki (seed=42) so the pipeline runs on weak hardware.
+      chosen [ggo, odsek] pairs (seed=42) so the pipeline runs on weak hardware.
       Demo outputs go to data/demo/{train,val,test}.csv.
 
     Full outputs:
@@ -242,13 +254,13 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
     )
 
     if demo:
-        n_available = df["odsek"].n_unique()
+        n_available = df.select(["ggo", "odsek"]).unique().shape[0]
         n_sample    = min(DEMO_N_ODSEKI, n_available)
-        log.info(f"  [demo] subsampling to {n_sample} of {n_available} odseki (seed=42)...")
-        demo_odseki = (
-            df.select("odsek").unique().sample(n=n_sample, seed=42)["odsek"]
+        log.info(f"  [demo] subsampling to {n_sample} of {n_available} [ggo, odsek] pairs (seed=42)...")
+        demo_pairs = (
+            df.select(["ggo", "odsek"]).unique().sample(n=n_sample, seed=42)
         )
-        df = df.filter(pl.col("odsek").is_in(demo_odseki))
+        df = df.join(demo_pairs, on=["ggo", "odsek"], how="inner")
 
     train = df.filter(pl.col("leto") < TRAIN_CUTOFF_YEAR)
     val   = df.filter(

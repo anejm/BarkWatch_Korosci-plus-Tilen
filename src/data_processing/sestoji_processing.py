@@ -7,6 +7,7 @@ INPUT_FILE  = str(_ROOT / "data" / "raw" / "ZGS" / "sestoji.gpkg")
 OUTPUT_FILE = str(_ROOT / "data" / "processed" / "sestoji_processed.csv")
 
 COLUMNS_TO_KEEP = [
+    'ggo',
     'odsek',
     'sestoj',
     'povrsina',

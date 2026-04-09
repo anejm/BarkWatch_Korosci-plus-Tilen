@@ -48,22 +48,23 @@ def _build_monthly(raw_path: Path = RAW_POSEK) -> pd.DataFrame:
     """Load raw posek CSV and aggregate kubikov to monthly sums per odsek."""
     df_raw = pd.read_csv(raw_path, low_memory=False)
     df_raw.columns = df_raw.columns.str.strip()
+    df_raw["ggo"] = df_raw["ggo"].astype(str).str.strip()
     df_raw["odsek"] = df_raw["odsek"].str.strip()
 
-    df = df_raw[["odsek", "kubikov", "posekano"]].copy()
+    df = df_raw[["ggo", "odsek", "kubikov", "posekano"]].copy()
     df = df.rename(columns={"posekano": "datum"})
     df["datum"] = pd.to_datetime(df["datum"], errors="coerce")
-    df = df.dropna(subset=["odsek", "datum", "kubikov"])
+    df = df.dropna(subset=["ggo", "odsek", "datum", "kubikov"])
 
-    df = df.set_index(["odsek", "datum"])
+    df = df.set_index(["ggo", "odsek", "datum"])
     monthly = (
-        df.groupby("odsek")
+        df.groupby(["ggo", "odsek"])
           .resample("MS", level="datum")["kubikov"]
           .sum()
           .rename("target")
           .reset_index()
     )
-    return monthly.sort_values(["odsek", "datum"]).reset_index(drop=True)
+    return monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
 
 
 def _add_calendar(df: pd.DataFrame) -> pd.DataFrame:
@@ -80,7 +81,7 @@ def _add_calendar(df: pd.DataFrame) -> pd.DataFrame:
 def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add lag, rolling, diff, and expanding features per odsek."""
     _base_col = "log1p_target" if LOG_TARGET else "target"
-    grp = df.groupby("odsek")[_base_col]
+    grp = df.groupby(["ggo", "odsek"])[_base_col]
 
     for lag in LAGS:
         df[f"lag_{lag}"] = grp.shift(lag)
@@ -110,15 +111,15 @@ def preprocess() -> pl.DataFrame:
     Load, clean, and feature-engineer posek data.
 
     Returns:
-        polars DataFrame with monthly per-odsek feature table.
+        polars DataFrame with monthly per-[ggo, odsek] feature table.
     """
     monthly = _build_monthly()
     monthly = _add_calendar(monthly)
-    monthly = monthly.sort_values(["odsek", "datum"]).reset_index(drop=True)
+    monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["odsek", "datum", "leto_mesec", "leto",
+        ["ggo", "odsek", "datum", "leto_mesec", "leto",
          "mesec_sin", "mesec_cos",
          "target", "log1p_target", "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
@@ -136,25 +137,25 @@ def make_target() -> pl.DataFrame:
     Build the 12-step ahead target matrix.
 
     Returns:
-        polars DataFrame with columns: odsek, leto_mesec, h1..h12.
+        polars DataFrame with columns: ggo, odsek, leto_mesec, h1..h12.
         Only rows with all 12 future months known are included.
     """
     monthly = _build_monthly()
     monthly = _add_calendar(monthly)
 
-    target_pivot = monthly[["odsek", "leto_mesec", "target"]].copy()
+    target_pivot = monthly[["ggo", "odsek", "leto_mesec", "target"]].copy()
 
     horizon_frames = []
     for h in range(1, 13):
         shifted = (
             target_pivot
-            .groupby("odsek")["target"]
+            .groupby(["ggo", "odsek"])["target"]
             .shift(-h)
             .rename(f"h{h}")
         )
         horizon_frames.append(shifted)
 
-    target_df = target_pivot[["odsek", "leto_mesec"]].copy()
+    target_df = target_pivot[["ggo", "odsek", "leto_mesec"]].copy()
     target_df = pd.concat([target_df] + horizon_frames, axis=1)
     target_df = target_df.dropna(subset=[f"h{h}" for h in range(1, 13)])
     target_df = target_df.reset_index(drop=True)
@@ -172,16 +173,19 @@ def main():
 
     print("Loading raw posek data …")
     monthly = _build_monthly()
-    print(f"  Monthly rows: {len(monthly):,}  |  Odseki: {monthly['odsek'].nunique():,}")
+    print(
+        f"  Monthly rows: {len(monthly):,}  |  "
+        f"Unique [ggo, odsek]: {monthly[['ggo', 'odsek']].drop_duplicates().shape[0]:,}"
+    )
 
     monthly = _add_calendar(monthly)
-    monthly = monthly.sort_values(["odsek", "datum"]).reset_index(drop=True)
+    monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
 
-    print("Computing lag & rolling features per odsek …")
+    print("Computing lag & rolling features per [ggo, odsek] …")
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["odsek", "datum", "leto_mesec", "leto",
+        ["ggo", "odsek", "datum", "leto_mesec", "leto",
          "mesec_sin", "mesec_cos",
          "target", "log1p_target", "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]

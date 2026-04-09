@@ -13,7 +13,7 @@ Input:
 
 Output:
   data/predictions/predictions.csv
-    Columns: odsek, leto_mesec, h1_pred .. h12_pred
+    Columns: ggo, odsek, leto_mesec, h1_pred .. h12_pred
 """
 
 import joblib
@@ -43,10 +43,25 @@ LOG_TARGET: bool = True
 # ---------------------------------------------------------------------------
 # Columns  (must match train.py)
 # ---------------------------------------------------------------------------
-INDEX_COLS  = ["odsek", "leto_mesec"]
+INDEX_COLS  = ["ggo", "odsek", "leto_mesec"]
 DROP_COLS   = ["datum"]
 TARGET_COLS = [f"h{h}" for h in range(1, 13)]
 PRED_COLS   = [f"h{h}_pred" for h in range(1, 13)]
+
+
+def _resolve_test_path() -> Path:
+  """Prefer top-level data/test.csv (dummy workflow), fallback to processed split."""
+  test_top = ROOT / "data" / "test.csv"
+  return test_top if test_top.exists() else TEST_PATH
+
+
+def _present_index_cols(df: pd.DataFrame) -> list[str]:
+  cols = [c for c in INDEX_COLS if c in df.columns]
+  required = {"odsek", "leto_mesec"}
+  if not required.issubset(set(cols)):
+    missing = ", ".join(sorted(required - set(cols)))
+    raise ValueError(f"Missing required identifier columns: {missing}")
+  return cols
 
 # ---------------------------------------------------------------------------
 # 1. Load models
@@ -59,10 +74,12 @@ print(f"  Loaded {len(models)} horizon models: {list(models.keys())}")
 # 2. Load test set
 # ---------------------------------------------------------------------------
 print("Loading test set …")
-test = pd.read_csv(TEST_PATH)
+test_path = _resolve_test_path()
+test = pd.read_csv(test_path)
+present_index_cols = _present_index_cols(test)
 
-index   = test[INDEX_COLS].copy()
-X_test  = test.drop(columns=DROP_COLS + INDEX_COLS + TARGET_COLS, errors="ignore")
+index   = test[present_index_cols].copy()
+X_test  = test.drop(columns=DROP_COLS + present_index_cols + TARGET_COLS, errors="ignore")
 y_test  = test[TARGET_COLS].copy()
 
 # Drop rows whose lag/rolling features are NaN (first rows per odsek)
