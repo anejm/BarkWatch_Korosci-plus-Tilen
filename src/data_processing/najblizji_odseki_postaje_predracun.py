@@ -128,23 +128,17 @@ def _nearest_station_ids(
 
 def _add_yearly_stations(
     odsek_df: pd.DataFrame,
-    lokacije: pd.DataFrame,
     postaje_leta: pd.DataFrame,
 ) -> pd.DataFrame:
     """For each year in YEARS add two columns: station_123_YYYY and station_23_YYYY,
-    containing the nearest active station of each type for that year."""
-    # postaje_leta has: leto, station_id, tip — join coordinates from lokacije
-    postaje_coords = postaje_leta.merge(
-        lokacije[["ID", "Latitude", "Longitude"]],
-        left_on="station_id", right_on="ID",
-        how="inner",
-    )
+    containing the nearest active station of each type for that year.
+    postaje_leta must have columns: leto, station_id, tip, Longitude, Latitude."""
+    postaje_leta = postaje_leta.rename(columns={"station_id": "ID", "tip": "Type"})
+    postaje_leta["Type"] = postaje_leta["Type"].astype(int)
 
     for year in YEARS:
         print(f"  Year {year}...", end=" ", flush=True)
-        year_stations = postaje_coords[postaje_coords["leto"] == year].copy()
-        year_stations = year_stations.rename(columns={"tip": "Type"})
-        year_stations["Type"] = year_stations["Type"].astype(int)
+        year_stations = postaje_leta[postaje_leta["leto"] == year]
 
         odsek_df[f"station_123_{year}"] = _nearest_station_ids(odsek_df, year_stations, [1, 2, 3])
         odsek_df[f"station_23_{year}"]  = _nearest_station_ids(odsek_df, year_stations, [2, 3])
@@ -202,7 +196,7 @@ def main(radius_km: float = DEFAULT_RADIUS_KM) -> None:
     print(f"  {len(postaje_leta):,} rows loaded ({postaje_leta['leto'].min()}–{postaje_leta['leto'].max()})")
 
     print("Finding nearest active station per year...")
-    odsek_df = _add_yearly_stations(odsek_df, lokacije, postaje_leta)
+    odsek_df = _add_yearly_stations(odsek_df, postaje_leta)
 
     print(f"Finding nearest odseki within {radius_km} km...")
     odsek_df["bliznji_odseki"] = _bliznji_odseki_series(odsek_df, radius_km)
