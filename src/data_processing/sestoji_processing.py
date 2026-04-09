@@ -1,11 +1,12 @@
 import geopandas as gpd
 import pandas as pd
+from pathlib import Path
 
-INPUT_FILE = 'sestoji.gpkg'
-OUTPUT_FILE = 'sestoji_processed.csv'
+_ROOT = Path(__file__).resolve().parents[2]
+INPUT_FILE  = str(_ROOT / "data" / "raw" / "ZGS" / "sestoji.gpkg")
+OUTPUT_FILE = str(_ROOT / "data" / "processed" / "sestoji_processed.csv")
 
 COLUMNS_TO_KEEP = [
-    'ggo',
     'odsek',
     'sestoj',
     'povrsina',
@@ -54,7 +55,7 @@ def main():
     df = gdf[available].copy()
 
     # Columns to one-hot encode
-    ONEHOT_COLUMNS = ['ggo', 
+    ONEHOT_COLUMNS = [
                       'rfaza', 
                       'sklep', 
                       'zasnova', 
