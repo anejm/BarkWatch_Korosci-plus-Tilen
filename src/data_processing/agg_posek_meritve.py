@@ -238,5 +238,24 @@ def main():
     print(list(output.columns))
 
 
+def aggregate() -> "pl.DataFrame":
+    """
+    Run the full posek-weather aggregation and return result as polars DataFrame.
+
+    Reads from:
+      - data/processed/posek_processed.csv
+      - data/processed/najblizji_odseki_postaje.csv
+      - data/processed/vreme_mesecno.csv
+
+    Returns:
+        polars DataFrame with columns: odsek_id, leto_mesec, used_station,
+        and rolling 12-month weather features.
+    """
+    import polars as pl
+
+    main()
+    return pl.read_csv(OUT_PATH)
+
+
 if __name__ == "__main__":
     main()

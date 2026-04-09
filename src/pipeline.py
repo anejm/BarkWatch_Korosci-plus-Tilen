@@ -3,378 +3,301 @@ pipeline.py
 -----------
 Orchestrates the full BarkWatch data pipeline:
 
-  1. Preprocess raw datasets  (posek, odsek, sestoj, meritve)
-  2. Aggregate relationships  (target matrix, odseki+sestoji, weather per odsek,
-                               monthly weather lookup, neighbour odseki features)
-  3. Export train / val / test splits  (70 % / 15 % / 15 %, seed=42)
+  1. Preprocess  – clean raw sources (posek, odseki, sestoji, meritve)
+  2. Aggregate   – build relationship tables (weather join, neighbour join,
+                   odseki+sestoji join)
+  3. Join        – combine all tables into one feature-rich dataset
+  4. Export      – split into train / val / test and write CSVs
 
 Usage:
-    python src/pipeline.py
-
-Outputs:
-    data/train.csv
-    data/val.csv
-    data/test.csv
+    python pipeline.py               # full run, year-based split
+    python pipeline.py --demo        # small demo dataset (N odseki)
 """
 
+import argparse
 import logging
 import sys
-import warnings
-import pandas as pd
 from pathlib import Path
 
-warnings.filterwarnings("ignore")
+import polars as pl
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stdout,
 )
-log = logging.getLogger("pipeline")
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 ROOT          = Path(__file__).resolve().parents[1]
-DATA_DIR      = ROOT / "data"
-PROCESSED_DIR = DATA_DIR / "processed"
-OUT_DIR       = DATA_DIR
+PROCESSED_DIR = ROOT / "data" / "processed"
+OUTPUT_DIR    = ROOT / "data"
 
-TARGET_CSV        = PROCESSED_DIR / "target.csv"
-ODSEKI_AGG_CSV    = PROCESSED_DIR / "odseki_processed.csv"
-POSEK_MERITVE_CSV = PROCESSED_DIR / "posek_meritve.csv"
-VREME_MESECNO_CSV = PROCESSED_DIR / "vreme_mesecno.csv"
+# ---------------------------------------------------------------------------
+# Split configuration  (edit these to change the temporal boundaries)
+# ---------------------------------------------------------------------------
+TRAIN_CUTOFF_YEAR = 2020   # train:  leto  <  TRAIN_CUTOFF_YEAR
+VAL_CUTOFF_YEAR   = 2022   # val:    TRAIN_CUTOFF_YEAR <= leto < VAL_CUTOFF_YEAR
+                            # test:   leto >= VAL_CUTOFF_YEAR
 
-sys.path.insert(0, str(ROOT / "src" / "data_processing"))
+# Demo mode: keep only this many randomly-sampled odseki (seed=42)
+DEMO_N_ODSEKI = 500
 
-import polars as pl
+# ---------------------------------------------------------------------------
+# Module imports – add data_processing to path so modules resolve cleanly
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).parent / "data_processing"))
+
+import posek_processing
+import odseki_processing
+import sestoji_processing
+import meritve_processing
+import agg_posek_meritve
+import agg_posek_sosedi
+import agg_sestoji_odseke
+import najblizji_odseki_postaje_predracun
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Preprocessing
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Step 1 – Preprocessing
+# ---------------------------------------------------------------------------
 
-def step1_preprocess() -> dict[str, pl.DataFrame | None]:
+def step_preprocess():
     """
-    Call preprocess() on each raw-data module.
+    Call each preprocessing module, save intermediate CSVs, and return
+    the resulting polars DataFrames.
 
-    Returns a dict with keys: posek, meritve, odsek, sestoj.
-    Modules that cannot run (e.g. missing GeoPackage) return None.
+    Intermediate files written:
+      data/processed/posek_processed.csv
+      data/processed/odseki_processed.csv
+      data/processed/sestoji_processed.csv
+      data/processed/vreme_mesecno.csv
     """
-    log.info("═══ STEP 1: Preprocessing ═══════════════════════════════════")
-    results: dict[str, pl.DataFrame | None] = {}
+    log.info("=== Step 1: Preprocessing ===")
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("  posek_processing.preprocess()")
-    import posek_processing
-    df = posek_processing.preprocess()
-    log.info(f"    → {df.shape[0]:,} rows × {df.shape[1]} cols")
-    results["posek"] = df
+    log.info("  [posek] loading and feature-engineering harvest data...")
+    posek_df = posek_processing.preprocess()
+    posek_df.write_csv(PROCESSED_DIR / "posek_processed.csv")
+    log.info(f"  [posek] {posek_df.shape[0]:,} rows × {posek_df.shape[1]} cols "
+             f"→ posek_processed.csv")
 
-    log.info("  meritve_processing.preprocess()")
-    import meritve_processing
-    df = meritve_processing.preprocess()
-    log.info(f"    → {df.shape[0]:,} rows × {df.shape[1]} cols")
-    results["meritve"] = df
+    log.info("  [odseki] loading forest compartment GeoPackage...")
+    odseki_df = odseki_processing.preprocess()
+    odseki_df.write_csv(PROCESSED_DIR / "odseki_processed.csv")
+    log.info(f"  [odseki] {odseki_df.shape[0]:,} rows × {odseki_df.shape[1]} cols "
+             f"→ odseki_processed.csv")
 
-    log.info("  odseki_processing.preprocess()")
-    try:
-        import odseki_processing
-        df = odseki_processing.preprocess()
-        log.info(f"    → {df.shape[0]:,} rows × {df.shape[1]} cols")
-        results["odsek"] = df
-    except Exception as exc:
-        log.warning(f"    skipped — {exc}")
-        results["odsek"] = None
+    log.info("  [sestoji] loading forest stand GeoPackage...")
+    sestoji_df = sestoji_processing.preprocess()
+    sestoji_df.write_csv(PROCESSED_DIR / "sestoji_processed.csv")
+    log.info(f"  [sestoji] {sestoji_df.shape[0]:,} rows × {sestoji_df.shape[1]} cols "
+             f"→ sestoji_processed.csv")
 
-    log.info("  sestoji_processing.preprocess()")
-    try:
-        import sestoji_processing
-        df = sestoji_processing.preprocess()
-        log.info(f"    → {df.shape[0]:,} rows × {df.shape[1]} cols")
-        results["sestoj"] = df
-    except Exception as exc:
-        log.warning(f"    skipped — {exc}")
-        results["sestoj"] = None
+    log.info("  [meritve] aggregating ARSO weather data to monthly level...")
+    meritve_df = meritve_processing.preprocess()
+    meritve_df.write_csv(PROCESSED_DIR / "vreme_mesecno.csv")
+    log.info(f"  [meritve] {meritve_df.shape[0]:,} rows × {meritve_df.shape[1]} cols "
+             f"→ vreme_mesecno.csv")
 
-    return results
+    return posek_df, odseki_df, sestoji_df, meritve_df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — Aggregation helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Step 2 – Aggregate relationships
+# ---------------------------------------------------------------------------
 
-def _odsek_str(df: pl.DataFrame) -> pl.DataFrame:
-    """Cast 'odsek' column to Utf8 for consistent join keys."""
-    return df.with_columns(pl.col("odsek").cast(pl.Utf8))
-
-
-def _ensure_agg_sestoji():
-    """Run agg_sestoji_odseke.main() if its output CSV is missing."""
-    if ODSEKI_AGG_CSV.exists():
-        log.info("  odseki_processed.csv exists — skipping agg_sestoji_odseke")
-        return
-    log.info("  Running agg_sestoji_odseke.main() …")
-    try:
-        import agg_sestoji_odseke
-        agg_sestoji_odseke.main()
-        log.info(f"    → {ODSEKI_AGG_CSV}")
-    except Exception as exc:
-        log.warning(f"    agg_sestoji_odseke failed: {exc}")
-
-
-def _ensure_posek_meritve():
-    """Run agg_posek_meritve.main() if its output CSV is missing."""
-    if POSEK_MERITVE_CSV.exists():
-        log.info("  posek_meritve.csv exists — skipping agg_posek_meritve")
-        return
-    log.info("  Running agg_posek_meritve.main() (may take several minutes) …")
-    try:
-        import agg_posek_meritve
-        agg_posek_meritve.main()
-        log.info(f"    → {POSEK_MERITVE_CSV}")
-    except Exception as exc:
-        log.warning(f"    agg_posek_meritve failed: {exc}")
-
-
-def _join_target(df: pl.DataFrame) -> pl.DataFrame:
-    """Left-join 12-horizon targets on (odsek, leto_mesec)."""
-    log.info("  Joining target (h1..h12) on (odsek, leto_mesec) …")
-    import posek_processing
-    df_target = posek_processing.make_target()
-    df_target = _odsek_str(df_target)
-    out = df.join(df_target, on=["odsek", "leto_mesec"], how="left")
-    log.info(f"    shape: {out.shape}")
-    return out
-
-
-def _join_odseki(df: pl.DataFrame) -> pl.DataFrame:
-    """Left-join aggregated odseki + sestoji static features on odsek."""
-    if not ODSEKI_AGG_CSV.exists():
-        log.warning("  odseki_processed.csv missing — skipping odseki join")
-        return df
-    log.info("  Joining odseki forest features on odsek …")
-    df_odseki = pl.read_csv(ODSEKI_AGG_CSV, infer_schema_length=10_000)
-    if "geometry" in df_odseki.columns:
-        df_odseki = df_odseki.drop("geometry")
-    df_odseki = _odsek_str(df_odseki)
-    out = df.join(df_odseki, on="odsek", how="left")
-    log.info(f"    shape: {out.shape}")
-    return out
-
-
-def _join_posek_meritve(df: pl.DataFrame) -> pl.DataFrame:
+def step_aggregate():
     """
-    Left-join posek weather window features (30d / 90d / 365d) aggregated
-    to (odsek, leto_mesec) level.
-    """
-    if not POSEK_MERITVE_CSV.exists():
-        log.warning("  posek_meritve.csv missing — skipping weather window join")
-        return df
-    log.info("  Joining posek_meritve weather features on (odsek, leto_mesec) …")
-    df_pm = pl.read_csv(POSEK_MERITVE_CSV, infer_schema_length=10_000)
-    df_pm = _odsek_str(df_pm)
+    Build relationship tables and return them as polars DataFrames.
 
-    # Extract YYYY-MM from the posekano date string
-    if "posekano" in df_pm.columns:
-        df_pm = df_pm.with_columns(
-            pl.col("posekano").cast(pl.Utf8).str.slice(0, 7).alias("leto_mesec")
+    Sub-steps:
+      a) najblizji_odseki_postaje – precompute nearest stations & neighbours
+         (skipped when output file already exists)
+      b) agg_posek_meritve  – posek × weather  (key: odsek_id, leto_mesec)
+      c) agg_posek_sosedi   – posek × neighbour posek  (key: odsek_id, leto_mesec)
+      d) agg_sestoji_odseke – odseki × sestoji  (key: odsek_id)
+    """
+    log.info("=== Step 2: Aggregating relationships ===")
+
+    najblizji_out = PROCESSED_DIR / "najblizji_odseki_postaje.csv"
+    if najblizji_out.exists():
+        log.info("  [najblizji] output already exists – skipping precomputation")
+    else:
+        log.info("  [najblizji] computing nearest stations & odsek neighbours "
+                 "(this may take a while)...")
+        najblizji_odseki_postaje_predracun.main()
+        log.info(f"  [najblizji] written → {najblizji_out}")
+
+    log.info("  [agg_posek_meritve] joining posek with rolling weather features...")
+    agg_meritve_df = agg_posek_meritve.aggregate()
+    log.info(f"  [agg_posek_meritve] {agg_meritve_df.shape[0]:,} rows × "
+             f"{agg_meritve_df.shape[1]} cols")
+
+    log.info("  [agg_posek_sosedi] joining posek with neighbour posek features...")
+    agg_sosedi_df = agg_posek_sosedi.aggregate()
+    log.info(f"  [agg_posek_sosedi] {agg_sosedi_df.shape[0]:,} rows × "
+             f"{agg_sosedi_df.shape[1]} cols")
+
+    log.info("  [agg_sestoji_odseke] joining odseki with aggregated sestoji...")
+    agg_sestoji_df = agg_sestoji_odseke.aggregate()
+    log.info(f"  [agg_sestoji_odseke] {agg_sestoji_df.shape[0]:,} rows × "
+             f"{agg_sestoji_df.shape[1]} cols")
+
+    return agg_meritve_df, agg_sosedi_df, agg_sestoji_df
+
+
+# ---------------------------------------------------------------------------
+# Step 3 – Join all tables
+# ---------------------------------------------------------------------------
+
+def step_join(
+    posek_df: pl.DataFrame,
+    agg_meritve_df: pl.DataFrame,
+    agg_sosedi_df: pl.DataFrame,
+    agg_sestoji_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Left-join all aggregated tables onto the posek feature table.
+
+    Join order:
+      posek  ×  agg_posek_meritve  on (odsek, leto_mesec)
+             ×  agg_posek_sosedi   on (odsek, leto_mesec)
+             ×  agg_odseki_sestoji on (odsek)             [static features]
+    """
+    log.info("=== Step 3: Joining datasets ===")
+
+    base = posek_df
+
+    # agg tables use 'odsek_id' as their primary key; align with posek's 'odsek'
+    meritve_clean = agg_meritve_df.rename({"odsek_id": "odsek"})
+    # drop 'used_station' — internal join-artifact, not a model feature
+    if "used_station" in meritve_clean.columns:
+        meritve_clean = meritve_clean.drop("used_station")
+    base = base.join(meritve_clean, on=["odsek", "leto_mesec"], how="left")
+    log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    sosedi_clean = agg_sosedi_df.rename({"odsek_id": "odsek"})
+    base = base.join(sosedi_clean, on=["odsek", "leto_mesec"], how="left")
+    log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    sestoji_clean = agg_sestoji_df.rename({"odsek_id": "odsek"})
+    base = base.join(sestoji_clean, on="odsek", how="left", suffix="_odsek")
+    log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    # Fill nulls in numeric columns with 0; leave string/categorical as-is
+    numeric_cols = [
+        c for c, t in zip(base.columns, base.dtypes)
+        if t in (pl.Float32, pl.Float64, pl.Int32, pl.Int64,
+                 pl.UInt32, pl.UInt64, pl.Int8, pl.Int16,
+                 pl.UInt8, pl.UInt16)
+    ]
+    base = base.with_columns([
+        pl.col(c).fill_nan(None).fill_null(0) for c in numeric_cols
+    ])
+
+    log.info(f"  final dataset: {base.shape[0]:,} rows × {base.shape[1]} cols")
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Step 4 – Split and export
+# ---------------------------------------------------------------------------
+
+def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
+    """
+    Split the dataset by year and export train / val / test CSVs.
+
+    Boundaries (configure via module-level constants):
+      train : leto  <  TRAIN_CUTOFF_YEAR
+      val   : TRAIN_CUTOFF_YEAR  <= leto  <  VAL_CUTOFF_YEAR
+      test  : leto  >= VAL_CUTOFF_YEAR
+
+    Demo mode (--demo flag):
+      Before splitting, the dataset is subsampled to DEMO_N_ODSEKI randomly
+      chosen odseki (seed=42) so the pipeline runs on weak hardware.
+      Demo outputs go to data/demo/{train,val,test}.csv.
+
+    Full outputs:
+      data/train.csv, data/val.csv, data/test.csv
+      data/processed/splits/{train,val,test}.csv  (traceability copies)
+    """
+    log.info("=== Step 4: Splitting and exporting ===")
+
+    if "leto" not in df.columns:
+        raise ValueError(
+            "Column 'leto' not found in final dataset – cannot apply year-based split."
         )
 
-    # Only average the weather window columns
-    feat_cols = [c for c in df_pm.columns
-                 if c.startswith(("30d_", "90d_", "365d_"))]
-    if not feat_cols:
-        log.warning("    no window feature columns found in posek_meritve.csv")
-        return df
-
-    df_pm_monthly = df_pm.group_by(["odsek", "leto_mesec"]).agg(
-        [pl.col(c).mean() for c in feat_cols]
+    log.info(
+        f"  split config: train < {TRAIN_CUTOFF_YEAR} | "
+        f"val {TRAIN_CUTOFF_YEAR}–{VAL_CUTOFF_YEAR - 1} | "
+        f"test >= {VAL_CUTOFF_YEAR}"
     )
-    out = df.join(df_pm_monthly, on=["odsek", "leto_mesec"], how="left")
-    log.info(f"    shape: {out.shape}")
-    return out
 
+    if demo:
+        n_available = df["odsek"].n_unique()
+        n_sample    = min(DEMO_N_ODSEKI, n_available)
+        log.info(f"  [demo] subsampling to {n_sample} of {n_available} odseki (seed=42)...")
+        demo_odseki = (
+            df.select("odsek").unique().sample(n=n_sample, seed=42)["odsek"]
+        )
+        df = df.filter(pl.col("odsek").is_in(demo_odseki))
 
-def _join_vreme_monthly(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Left-join monthly weather from the nearest ARSO station per odsek
-    on (odsek, leto_mesec).
-
-    Resolves nearest station via bliznje_vremenske_postaje, then attaches
-    monthly aggregated weather from vreme_mesecno.csv.
-    """
-    if not VREME_MESECNO_CSV.exists():
-        log.warning("  vreme_mesecno.csv missing — skipping monthly weather join")
-        return df
-
-    log.info("  Resolving nearest ARSO station per odsek …")
-    try:
-        from bliznje_vremenske_postaje import get_postaje, _load_vreme
-    except Exception as exc:
-        log.warning(f"  bliznje_vremenske_postaje unavailable: {exc}")
-        return df
-
-    try:
-        vreme_raw = _load_vreme()
-        available_sids = set(vreme_raw.index.get_level_values("station_id"))
-    except Exception as exc:
-        log.warning(f"  Could not load vreme index: {exc}")
-        return df
-
-    unique_odseki = df["odsek"].unique().to_list()
-    odsek_station: dict[str, str | None] = {}
-    for oid in unique_odseki:
-        try:
-            postaje = get_postaje(str(oid))
-            sid = None
-            for p in postaje["all"]:
-                if str(p.id) in available_sids:
-                    sid = str(p.id)
-                    break
-            odsek_station[oid] = sid
-        except Exception:
-            odsek_station[oid] = None
-
-    n_mapped = sum(1 for v in odsek_station.values() if v is not None)
-    log.info(f"    {n_mapped}/{len(unique_odseki)} odseki mapped to ARSO stations")
-
-    if n_mapped == 0:
-        log.warning("  No odseki mapped — skipping monthly weather join")
-        return df
-
-    mapping_rows = [{"odsek": str(k), "station_id": v}
-                    for k, v in odsek_station.items() if v is not None]
-    df_map = pl.DataFrame(mapping_rows)
-
-    df_vreme = pl.read_csv(VREME_MESECNO_CSV, infer_schema_length=10_000)
-    df_vreme = df_vreme.with_columns(pl.col("station_id").cast(pl.Utf8))
-
-    # Prefix all non-key columns to avoid clashes with posek feature columns
-    rename_map = {c: f"vreme_{c}"
-                  for c in df_vreme.columns
-                  if c not in ("station_id", "leto_mesec")}
-    df_vreme = df_vreme.rename(rename_map)
-
-    df_vreme_odsek = (
-        df_map
-        .join(df_vreme, on="station_id", how="left")
-        .drop("station_id")
+    train = df.filter(pl.col("leto") < TRAIN_CUTOFF_YEAR)
+    val   = df.filter(
+        (pl.col("leto") >= TRAIN_CUTOFF_YEAR) & (pl.col("leto") < VAL_CUTOFF_YEAR)
     )
-    out = df.join(df_vreme_odsek, on=["odsek", "leto_mesec"], how="left")
-    log.info(f"    shape: {out.shape}")
-    return out
+    test  = df.filter(pl.col("leto") >= VAL_CUTOFF_YEAR)
+
+    out_dir    = OUTPUT_DIR / "demo" if demo else OUTPUT_DIR
+    splits_dir = PROCESSED_DIR / "splits" / ("demo" if demo else "")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    splits_dir.mkdir(parents=True, exist_ok=True)
+
+    for split, name in [(train, "train"), (val, "val"), (test, "test")]:
+        split.write_csv(out_dir    / f"{name}.csv")
+        split.write_csv(splits_dir / f"{name}.csv")
+
+    tag = " [demo]" if demo else ""
+    log.info(f"  train{tag} : {len(train):,} rows → {out_dir}/train.csv")
+    log.info(f"  val{tag}   : {len(val):,} rows → {out_dir}/val.csv")
+    log.info(f"  test{tag}  : {len(test):,} rows → {out_dir}/test.csv")
 
 
-def _join_bliznji_odseki(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Add aggregated forest characteristics from the 10 nearest neighbour
-    odseki per odsek, using bliznji_odseki.get_najblizje() and
-    agg_posek_sosedi.agg_odseki().
-    """
-    log.info("  Computing bliznji odseki neighbour features …")
-    try:
-        from bliznji_odseki import get_najblizje
-        from agg_posek_sosedi import agg_odseki
-    except Exception as exc:
-        log.warning(f"  bliznji_odseki / agg_posek_sosedi unavailable: {exc}")
-        return df
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-    unique_odseki = df["odsek"].unique().to_list()
-    rows: list[dict] = []
-    skipped = 0
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="BarkWatch data pipeline – preprocess, aggregate, split."
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help=(
+            f"Create small demo datasets ({DEMO_N_ODSEKI} odseki) "
+            "suitable for weak computers. Outputs go to data/demo/."
+        ),
+    )
+    args = parser.parse_args()
 
-    for oid in unique_odseki:
-        try:
-            neighbours = get_najblizje(str(oid))
-            agg = agg_odseki(neighbours)
-            row: dict = {"odsek": str(oid)}
-            for k, v in agg.items():
-                row[f"sosedi_{k}"] = float(v) if v is not None else None
-            rows.append(row)
-        except Exception:
-            skipped += 1
+    log.info("Starting BarkWatch data pipeline%s", " [DEMO MODE]" if args.demo else "")
 
-    if not rows:
-        log.warning("  No neighbour features computed — skipping")
-        return df
+    posek_df, odseki_df, sestoji_df, meritve_df = step_preprocess()
+    agg_meritve_df, agg_sosedi_df, agg_sestoji_df = step_aggregate()
+    final_df = step_join(posek_df, agg_meritve_df, agg_sosedi_df, agg_sestoji_df)
+    step_split_export(final_df, demo=args.demo)
 
-    log.info(f"    {len(rows)} odseki aggregated, {skipped} skipped")
-    df_sosedi = pl.from_pandas(pd.DataFrame(rows))
-    out = df.join(df_sosedi, on="odsek", how="left")
-    log.info(f"    shape: {out.shape}")
-    return out
+    log.info("Pipeline complete.")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — Aggregation orchestration
-# ─────────────────────────────────────────────────────────────────────────────
-
-def step2_aggregate(df_posek: pl.DataFrame) -> pl.DataFrame:
-    """
-    Join all relationship DataFrames onto the posek feature table.
-
-    Join order (all left joins):
-      posek → target          on (odsek, leto_mesec)
-      posek → odseki          on  odsek
-      posek → posek_meritve   on (odsek, leto_mesec)
-      posek → vreme_mesecno   on (odsek, leto_mesec)   via nearest station
-      posek → bliznji_odseki  on  odsek                via neighbour aggregation
-    """
-    log.info("═══ STEP 2: Aggregation ══════════════════════════════════════")
-
-    _ensure_agg_sestoji()
-    _ensure_posek_meritve()
-
-    df = _odsek_str(df_posek)
-    df = _join_target(df)
-    df = _join_odseki(df)
-    df = _join_posek_meritve(df)
-    df = _join_vreme_monthly(df)
-    df = _join_bliznji_odseki(df)
-
-    log.info(f"  Final combined shape: {df.shape[0]:,} rows × {df.shape[1]} cols")
-    return df
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Split and export
-# ─────────────────────────────────────────────────────────────────────────────
-
-def step3_export(df: pl.DataFrame) -> None:
-    """
-    Shuffle deterministically and split into train / val / test (70/15/15).
-    Saves three CSV files to data/.
-    """
-    log.info("═══ STEP 3: Split and export ═════════════════════════════════")
-
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    n = len(df)
-
-    df = df.sample(fraction=1.0, seed=42, shuffle=True)
-
-    n_train = int(n * 0.70)
-    n_val   = int(n * 0.15)
-
-    df_train = df.slice(0, n_train)
-    df_val   = df.slice(n_train, n_val)
-    df_test  = df.slice(n_train + n_val)
-
-    df_train.write_csv(OUT_DIR / "train.csv")
-    df_val.write_csv(OUT_DIR / "val.csv")
-    df_test.write_csv(OUT_DIR / "test.csv")
-
-    log.info(f"  train : {len(df_train):,} rows  →  {OUT_DIR / 'train.csv'}")
-    log.info(f"  val   : {len(df_val):,} rows  →  {OUT_DIR / 'val.csv'}")
-    log.info(f"  test  : {len(df_test):,} rows  →  {OUT_DIR / 'test.csv'}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entrypoint
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log.info("BarkWatch data pipeline starting …")
-    preprocessed  = step1_preprocess()
-    df_combined   = step2_aggregate(preprocessed["posek"])
-    step3_export(df_combined)
-    log.info("Pipeline complete.")
+    main()

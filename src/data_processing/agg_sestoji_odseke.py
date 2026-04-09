@@ -195,5 +195,23 @@ def main():
     print(list(result.columns))
 
 
+def aggregate() -> "pl.DataFrame":
+    """
+    Run the full odseki+sestoji aggregation and return result as polars DataFrame.
+
+    Reads from:
+      - data/processed/odseki_processed.csv
+      - data/processed/sestoji_processed.csv
+
+    Returns:
+        polars DataFrame with columns: odsek_id, odseki features,
+        and aggregated sestoji features (sestoji_* prefix).
+    """
+    import polars as pl
+
+    main()
+    return pl.read_csv(OUT_PATH)
+
+
 if __name__ == "__main__":
     main()

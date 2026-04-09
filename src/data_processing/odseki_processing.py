@@ -1,5 +1,6 @@
 import geopandas as gpd
 import pandas as pd
+import polars as pl
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -47,9 +48,9 @@ ONEHOT_COLUMNS = [
 ]
 
 
-def preprocess() -> pd.DataFrame:
+def preprocess() -> pl.DataFrame:
     """
-    Load and process odseki GeoPackage, return as pandas DataFrame.
+    Load and process odseki GeoPackage, return as polars DataFrame.
 
     Applies column selection and one-hot encoding.
 
@@ -70,7 +71,12 @@ def preprocess() -> pd.DataFrame:
     onehot_existing = [col for col in ONEHOT_COLUMNS if col in df.columns]
     df = pd.get_dummies(df, columns=onehot_existing, dummy_na=False)
 
-    return df
+    # Cast bool columns to int for polars compatibility
+    bool_cols = [c for c in df.columns if df[c].dtype == bool]
+    for col in bool_cols:
+        df[col] = df[col].astype(int)
+
+    return pl.from_pandas(df)
 
 
 def main():

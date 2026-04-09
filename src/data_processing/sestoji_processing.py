@@ -36,6 +36,40 @@ COLUMNS_TO_KEEP = [
     'etsku',
 ]
 
+def preprocess() -> "pl.DataFrame":
+    """
+    Load and process sestoji GeoPackage, return as polars DataFrame.
+
+    Applies column selection and one-hot encoding.
+
+    Raises:
+        FileNotFoundError: if the GeoPackage source file does not exist.
+    """
+    import polars as pl
+
+    if not Path(INPUT_FILE).exists():
+        raise FileNotFoundError(f"GeoPackage not found: {INPUT_FILE}")
+
+    gdf = gpd.read_file(INPUT_FILE)
+    available = [col for col in COLUMNS_TO_KEEP if col in gdf.columns]
+    missing = [col for col in COLUMNS_TO_KEEP if col not in gdf.columns]
+    if missing:
+        print(f"WARNING: columns not found and skipped: {missing}")
+
+    df = gdf[available].copy()
+
+    ONEHOT_COLUMNS = ["rfaza", "sklep", "zasnova", "negovan", "pomzas"]
+    onehot_existing = [col for col in ONEHOT_COLUMNS if col in df.columns]
+    df = pd.get_dummies(df, columns=onehot_existing, dummy_na=False)
+
+    # Cast bool columns to int for polars compatibility
+    bool_cols = [c for c in df.columns if df[c].dtype == bool]
+    for col in bool_cols:
+        df[col] = df[col].astype(int)
+
+    return pl.from_pandas(df)
+
+
 def main():
     print(f"Reading {INPUT_FILE}...")
     gdf = gpd.read_file(INPUT_FILE)

@@ -199,5 +199,23 @@ def main():
     print(list(result.columns))
 
 
+def aggregate() -> "pl.DataFrame":
+    """
+    Run the full posek-neighbor aggregation and return result as polars DataFrame.
+
+    Reads from:
+      - data/processed/najblizji_odseki_postaje.csv
+      - data/processed/posek_processed.csv
+
+    Returns:
+        polars DataFrame with columns: odsek_id, leto_mesec,
+        and aggregated neighbor posek features (sosedi_* prefix).
+    """
+    import polars as pl
+
+    main()
+    return pl.read_csv(OUT_PATH)
+
+
 if __name__ == "__main__":
     main()
