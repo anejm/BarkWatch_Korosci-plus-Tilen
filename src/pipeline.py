@@ -91,7 +91,7 @@ def step_preprocess():
              f"→ posek_processed.csv")
 
     log.info("  [posek] building 12-horizon target matrix...")
-    target_df = posek_processing.make_target()
+    target_df = posek_processing.make_target_kubikov()
     target_df.write_csv(PROCESSED_DIR / "target.csv")
     log.info(f"  [posek] {target_df.shape[0]:,} rows × {target_df.shape[1]} cols "
              f"→ target.csv")

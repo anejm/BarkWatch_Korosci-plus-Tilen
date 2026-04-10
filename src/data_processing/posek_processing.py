@@ -8,7 +8,7 @@ Produces two artefacts based on posek (harvest) data:
    the global min leto_mesec to the global max leto_mesec; months with no
    recorded harvest are filled with kubikov = 0.
 
-2. 36-step ahead target matrix (target_kubikov.csv)
+2. 36-step ahead target matrix (target.csv)
    For each [ggo, odsek, leto_mesec] the columns h_1 … h_36 hold the
    (optionally log1p-scaled) kubikov values 1–36 months ahead.
    Rows where a future month falls outside the observed data get NaN.
@@ -43,7 +43,7 @@ ROOT          = Path(__file__).resolve().parents[2]
 RAW_POSEK     = ROOT / "data" / "raw" / "ZGS" / "posek.csv"
 PROCESSED_DIR = ROOT / "data" / "processed"
 FEATURES_OUT  = PROCESSED_DIR / "posek_processed.csv"
-TARGET_OUT    = PROCESSED_DIR / "target_kubikov.csv"
+TARGET_OUT    = PROCESSED_DIR / "target.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ def make_target_kubikov() -> pl.DataFrame:
         shifted = (
             base.groupby(["ggo", "odsek"])["target"]
                 .shift(-h)
-                .rename(f"h_{h}")
+                .rename(f"h{h}")
         )
         horizon_frames.append(shifted)
 
@@ -192,7 +192,7 @@ def make_target_kubikov() -> pl.DataFrame:
     target_df = pd.concat([target_df] + horizon_frames, axis=1)
 
     if LOG_TARGET:
-        h_cols = [f"h_{h}" for h in range(1, HORIZON + 1)]
+        h_cols = [f"h{h}" for h in range(1, HORIZON + 1)]
         target_df[h_cols] = np.log1p(target_df[h_cols])
 
     target_df = target_df.reset_index(drop=True)
