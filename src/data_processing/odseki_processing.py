@@ -5,7 +5,8 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 INPUT_FILE  = str(_ROOT / "data" / "raw" / "ZGS" / "odseki_gozdno.gpkg")
-OUTPUT_FILE = str(_ROOT / "data" / "processed" / "odseki_processed.csv")
+OUTPUT_FILE          = str(_ROOT / "data" / "processed" / "odseki_processed.csv")
+OUTPUT_GEOMETRY_FILE = str(_ROOT / "data" / "processed" / "odseki_geometry.csv")
 
 COLUMNS_TO_KEEP = [
     'ggo',
@@ -45,6 +46,20 @@ ONEHOT_COLUMNS = [
     'intgosp',
     'rk_gurs',
 ]
+
+
+def save_geometry(gdf=None) -> None:
+    """Save ggo, odsek, geometry to odseki_geometry.csv for spatial lookups."""
+    if gdf is None:
+        if not Path(INPUT_FILE).exists():
+            raise FileNotFoundError(f"GeoPackage not found: {INPUT_FILE}")
+        import geopandas as gpd
+        gdf = gpd.read_file(INPUT_FILE)
+    cols = [c for c in ["ggo", "odsek", "geometry"] if c in gdf.columns]
+    geo_df = gdf[cols].copy()
+    geo_df["geometry"] = geo_df["geometry"].apply(lambda g: g.wkt if g is not None else None)
+    Path(OUTPUT_GEOMETRY_FILE).parent.mkdir(parents=True, exist_ok=True)
+    geo_df.to_csv(OUTPUT_GEOMETRY_FILE, index=False, encoding="utf-8")
 
 
 def preprocess() -> pl.DataFrame:

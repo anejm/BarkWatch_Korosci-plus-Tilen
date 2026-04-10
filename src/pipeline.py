@@ -100,6 +100,8 @@ def step_preprocess():
     odseki_df.write_csv(PROCESSED_DIR / "odseki_processed.csv")
     log.info(f"  [odseki] {odseki_df.shape[0]:,} rows × {odseki_df.shape[1]} cols "
              f"→ odseki_processed.csv")
+    odseki_processing.save_geometry()
+    log.info("  [odseki] geometry saved → odseki_geometry.csv")
 
     log.info("  [sestoji] loading forest stand GeoPackage...")
     sestoji_df = sestoji_processing.preprocess()
