@@ -58,6 +58,7 @@ import posek_processing
 import odseki_processing
 import sestoji_processing
 import meritve_processing
+import postaje_po_letih
 import agg_posek_meritve
 import agg_posek_sosedi
 import agg_sestoji_odseke
@@ -114,6 +115,10 @@ def step_preprocess():
     meritve_df.write_csv(PROCESSED_DIR / "vreme_mesecno.csv")
     log.info(f"  [meritve] {meritve_df.shape[0]:,} rows × {meritve_df.shape[1]} cols "
              f"→ vreme_mesecno.csv")
+
+    log.info("  [postaje] computing active stations per year...")
+    postaje_po_letih.main()
+    log.info("  [postaje] → postaje_po_letih.csv")
 
     return posek_df, odseki_df, sestoji_df, meritve_df
 
