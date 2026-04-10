@@ -178,6 +178,13 @@ def evaluate(preds: np.ndarray, id_df: pd.DataFrame, test_x: pd.DataFrame) -> No
     preds_ev = preds[row_idx]
     y_true   = matched[TARGET_COLS].values.astype(float)
 
+    # Drop rows where any target horizon is NaN
+    valid_mask = ~np.isnan(y_true).any(axis=1)
+    if valid_mask.sum() < len(y_true):
+        print(f"  Dropping {(~valid_mask).sum()} rows with NaN targets")
+    y_true   = y_true[valid_mask]
+    preds_ev = preds_ev[valid_mask]
+
     if LOG_TARGET:
         y_true   = np.expm1(np.maximum(y_true, 0))
         preds_ev = np.expm1(np.maximum(preds_ev, 0))
@@ -186,7 +193,7 @@ def evaluate(preds: np.ndarray, id_df: pd.DataFrame, test_x: pd.DataFrame) -> No
     rmse = root_mean_squared_error(y_true, preds_ev)
     nz   = y_true > 0
 
-    print(f"\nTest metrics ({len(matched):,} matched rows, all 12 horizons):")
+    print(f"\nTest metrics ({len(y_true):,} matched rows, all 12 horizons):")
     print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}")
     if nz.sum():
         print(f"  Non-zero — MAE: {mean_absolute_error(y_true[nz], preds_ev[nz]):.4f}"

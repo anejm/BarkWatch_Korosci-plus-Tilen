@@ -206,9 +206,9 @@ def train(short: bool) -> None:
         print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  "
               f"val_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
 
-        # scale_pos_weight: sqrt ratio gives minority class a gentle push
-        # without flooding predictions with false positives.
-        spw = np.sqrt(n_neg / max(n_pos, 1))
+        # scale_pos_weight: 0.75-power ratio — stronger than sqrt (~5x) but
+        # less aggressive than full ratio (~25x), balancing recall and precision.
+        spw = (n_neg / max(n_pos, 1)) ** 0.75
 
         # For late horizons, use precision-favouring threshold (beta=0.7)
         # to suppress the positive bias that compounds through sequential chain.

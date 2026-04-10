@@ -76,6 +76,26 @@ def add_derived_features(X: pd.DataFrame) -> pd.DataFrame:
     Seasonal interactions
       season_sin_x_lag1 : mesec_sin × lag_1
       season_cos_x_lag1 : mesec_cos × lag_1
+
+    Rolling max proxy  (from available lag checkpoints)
+      max_recent_12m    : max(lag_1, lag_3, lag_6, lag_12)
+      max_recent_24m    : max(lag_1, lag_3, lag_6, lag_12, lag_24)
+      any_harvest_12m   : binary — any lag in 12m window > 0
+      harvest_freq_12m  : fraction of 12m lag checkpoints > 0
+      total_recent_12m  : sum of 12m lag checkpoints
+
+    Year-over-year / historical ratios
+      yoy_ratio         : lag_12 / (lag_24 + ε)
+
+    Neighbor peak activity
+      neighbor_max_recent  : max(sosedi_lag_1_sum, _lag_3_sum, _lag_6_sum)
+      neighbor_any_recent  : binary — any neighbor active in past 6m
+
+    Weather stress
+      drought_stress    : avg_temp / (annual_precip / 100)  — bark beetle risk proxy
+
+    Cross signals
+      neighbor_self_activity : neighbor_max_recent × max_recent_12m
     """
     X = X.copy()
     cols = set(X.columns)
@@ -125,6 +145,38 @@ def add_derived_features(X: pd.DataFrame) -> pd.DataFrame:
     if {"mesec_cos", "lag_1"} <= cols:
         X["season_cos_x_lag1"] = X["mesec_cos"] * X["lag_1"]
 
+    # ── Rolling max proxy (from available lag checkpoints) ───────────────────
+    # True rolling max unavailable; max over lag checkpoints captures whether
+    # there was ever a large harvest event in the window.
+    _lag_12 = [c for c in ["lag_1", "lag_3", "lag_6", "lag_12"] if c in cols]
+    if len(_lag_12) >= 2:
+        X["max_recent_12m"] = X[_lag_12].max(axis=1)
+        X["any_harvest_12m"] = (X[_lag_12].max(axis=1) > 0).astype(np.float32)
+        X["harvest_freq_12m"] = (X[_lag_12] > 0).sum(axis=1) / len(_lag_12)
+        X["total_recent_12m"] = X[_lag_12].sum(axis=1)
+
+    _lag_24 = [c for c in ["lag_1", "lag_3", "lag_6", "lag_12", "lag_24"] if c in cols]
+    if len(_lag_24) >= 3:
+        X["max_recent_24m"] = X[_lag_24].max(axis=1)
+
+    # ── Year-over-year ratio ──────────────────────────────────────────────────
+    if {"lag_12", "lag_24"} <= cols:
+        X["yoy_ratio"] = _div(X["lag_12"], X["lag_24"])
+
+    # ── Neighbor peak activity ────────────────────────────────────────────────
+    _sosedi_lags = [c for c in ["sosedi_lag_1_sum", "sosedi_lag_3_sum", "sosedi_lag_6_sum"] if c in cols]
+    if len(_sosedi_lags) >= 2:
+        X["neighbor_max_recent"] = X[_sosedi_lags].max(axis=1)
+        X["neighbor_any_recent"] = (X[_sosedi_lags].max(axis=1) > 0).astype(np.float32)
+
+    # ── Weather drought stress: high temp + low rain → bark beetle risk ───────
+    if {"leto_povp_T_avg", "leto_padavine_skupaj_mm"} <= cols:
+        X["drought_stress"] = X["leto_povp_T_avg"] / (X["leto_padavine_skupaj_mm"].clip(lower=1) / 100)
+
+    # ── Neighbor × self activity interaction ─────────────────────────────────
+    if {"max_recent_12m", "neighbor_max_recent"} <= set(X.columns):
+        X["neighbor_self_activity"] = X["neighbor_max_recent"] * X["max_recent_12m"]
+
     return X
 
 
@@ -134,15 +186,16 @@ def add_derived_features(X: pd.DataFrame) -> pd.DataFrame:
 
 # Default hyperparameters
 _CLF_DEFAULTS: dict = dict(
-    n_estimators=1000,
-    learning_rate=0.05,
-    num_leaves=63,
+    n_estimators=2000,
+    learning_rate=0.03,      # lower LR → more trees, better convergence on minority class
+    num_leaves=127,          # more expressive than 63
     max_depth=-1,            # leaf-wise; num_leaves controls complexity
-    min_child_samples=30,
-    subsample=0.8,
+    min_child_samples=20,    # allow fitting smaller minority-class groups (was 30)
+    subsample=0.9,
     subsample_freq=1,
-    colsample_bytree=0.6,    # aggressive sampling: many correlated sestoji cols
-    reg_lambda=2.0,
+    colsample_bytree=0.7,    # was 0.6
+    reg_lambda=1.0,          # less regularization to capture minority class signal (was 2.0)
+    metric='auc',            # AUC for early stopping — logloss converges at iter 2 on imbalanced data
     random_state=42,
     n_jobs=-1,
     verbose=-1,
@@ -152,10 +205,10 @@ _REG_DEFAULTS: dict = dict(
     objective="huber",
     alpha=0.9,               # Huber α: top-10% outlier residuals get L1 treatment
     n_estimators=2000,
-    learning_rate=0.03,      # slightly lower → smoother convergence
-    num_leaves=63,
+    learning_rate=0.03,
+    num_leaves=127,          # was 63
     max_depth=-1,
-    min_child_samples=30,
+    min_child_samples=20,    # was 30
     subsample=0.8,
     subsample_freq=1,
     colsample_bytree=0.6,
@@ -209,7 +262,7 @@ class TwoStageHorizonModel:
         y_train: np.ndarray,
         X_val: pd.DataFrame,
         y_val: np.ndarray,
-        early_stopping_rounds: int = 50,
+        early_stopping_rounds: int = 100,
     ) -> None:
         self.feature_cols = list(X_train.columns)
 
