@@ -83,6 +83,16 @@ def _load_odseki() -> pd.DataFrame:
         if path.exists():
             df = pd.read_csv(path, encoding="utf-8", usecols=["odsek", "geometry"])
             frames.append(df)
+    if not frames:
+        combined = ODSEKI_DIR / "odseki_processed.csv"
+        if combined.exists():
+            df = pd.read_csv(combined, encoding="utf-8", usecols=["odsek", "geometry"])
+            frames.append(df)
+        else:
+            raise FileNotFoundError(
+                "No odseki_processed split files or combined file found in "
+                f"{ODSEKI_DIR}. Run step_preprocess() first."
+            )
     return pd.concat(frames, ignore_index=True)
 
 

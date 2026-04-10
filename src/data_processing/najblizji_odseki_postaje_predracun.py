@@ -75,6 +75,19 @@ def _load_odseki_centroids() -> pd.DataFrame:
         else:
             print(f"  {path.name}: NOT FOUND, skipping")
 
+    if not frames:
+        combined = ODSEKI_DIR / "odseki_processed.csv"
+        if combined.exists():
+            print(f"  No split files found; loading {combined.name} directly")
+            df = pd.read_csv(combined, encoding="utf-8", usecols=["ggo", "odsek", "geometry"])
+            frames.append(df)
+            print(f"  {combined.name}: {len(df):,} rows")
+        else:
+            raise FileNotFoundError(
+                "No odseki_processed split files or combined file found in "
+                f"{ODSEKI_DIR}. Run step_preprocess() first."
+            )
+
     df = pd.concat(frames, ignore_index=True)
     df["ggo"] = df["ggo"].astype(str)
     df["odsek"] = df["odsek"].astype(str)
