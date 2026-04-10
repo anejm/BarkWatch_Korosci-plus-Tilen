@@ -75,6 +75,19 @@ def _load_odseki_centroids() -> pd.DataFrame:
         else:
             print(f"  {path.name}: NOT FOUND, skipping")
 
+    if not frames:
+        geom_path = ODSEKI_DIR / "odseki_geometry.csv"
+        if geom_path.exists():
+            print(f"  No split files found; loading {geom_path.name} directly")
+            df = pd.read_csv(geom_path, encoding="utf-8", usecols=["ggo", "odsek", "geometry"])
+            frames.append(df)
+            print(f"  {geom_path.name}: {len(df):,} rows")
+        else:
+            raise FileNotFoundError(
+                f"No odseki_processed split files or odseki_geometry.csv found in {ODSEKI_DIR}."
+                " Run step_preprocess() first."
+            )
+
     df = pd.concat(frames, ignore_index=True)
     df["ggo"] = df["ggo"].astype(str)
     df["odsek"] = df["odsek"].astype(str)
