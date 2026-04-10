@@ -148,10 +148,13 @@ def main():
     # 1. Naloži poseke
     print(f"Berem poseke: {POSEK_IN}")
     posek = pd.read_csv(POSEK_IN, low_memory=False)
-    posek["ggo"]       = posek["ggo"].astype(str).str.strip()
-    posek["odsek"]     = posek["odsek"].astype(str).str.strip()
-    posek["leto"]      = posek["leto"].astype(int)
+    posek["ggo"]        = posek["ggo"].astype(str).str.strip()
+    posek["odsek"]      = posek["odsek"].astype(str).str.strip()
     posek["leto_mesec"] = posek["leto_mesec"].astype(str).str.strip()
+    if "leto" not in posek.columns:
+        posek["leto"] = posek["leto_mesec"].str[:4].astype(int)
+    else:
+        posek["leto"] = posek["leto"].astype(int)
     print(
         f"  Poseki: {len(posek):,}  |  "
         f"Unikatnih [ggo, odsek]: {posek[['ggo', 'odsek']].drop_duplicates().shape[0]:,}"
