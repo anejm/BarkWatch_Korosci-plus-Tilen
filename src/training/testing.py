@@ -18,6 +18,7 @@ Output:
 """
 
 import argparse
+import sys
 import joblib
 import numpy as np
 import pandas as pd
@@ -30,7 +31,11 @@ from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 # ---------------------------------------------------------------------------
 ROOT        = Path(__file__).resolve().parents[2]
 DATA_DIR    = ROOT / "data" / "processed" / "splits"
-MODEL_PATH  = ROOT / "models" / "xgb_models.pkl"
+MODEL_PATH  = ROOT / "models" / "lgb_models.pkl"
+
+# Allow importing feature-engineering helpers from project root
+sys.path.insert(0, str(ROOT))
+from models.model import add_derived_features, sanitize_columns
 TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
 PRED_DIR    = ROOT / "data" / "predictions"
 PRED_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,7 +83,11 @@ def load_test(short: bool) -> pd.DataFrame:
 
 
 def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split test into (id_df, X_base), filling NaN features with 0."""
+    """Split test into (id_df, X_base), filling NaN features with 0.
+
+    Applies the same sanitise → derive pipeline used in training so that
+    the feature set matches what each model was trained on.
+    """
     id_cols   = [c for c in POSSIBLE_KEYS if c in test_x.columns]
     drop_cols = [c for c in DROP_COLS + TARGET_COLS if c in test_x.columns]
     feat_cols = [c for c in test_x.columns if c not in set(id_cols + drop_cols)]
@@ -90,6 +99,9 @@ def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if nan_cols:
         print(f"  Filling NaN in {len(nan_cols)} columns with 0")
         X = X.fillna(0)
+
+    X = sanitize_columns(X)
+    X = add_derived_features(X)
 
     return id_df, X
 
