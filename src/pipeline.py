@@ -265,8 +265,13 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
     log.info("=== Step 4: Splitting and exporting ===")
 
     if "leto" not in df.columns:
-        raise ValueError(
-            "Column 'leto' not found in final dataset – cannot apply year-based split."
+        if "leto_mesec" not in df.columns:
+            raise ValueError(
+                "Neither 'leto' nor 'leto_mesec' found in final dataset – cannot apply year-based split."
+            )
+        log.info("  'leto' column missing – deriving from 'leto_mesec'")
+        df = df.with_columns(
+            pl.col("leto_mesec").str.slice(0, 4).cast(pl.Int32).alias("leto")
         )
 
     log.info(
