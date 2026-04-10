@@ -44,6 +44,9 @@ fi
 # ---------------------------------------------------------------------------
 # Generate
 # ---------------------------------------------------------------------------
+echo "[$(date '+%H:%M:%S')] Extract Current data ..."
+python src/extract_current_day_data.py
+
 echo "[$(date '+%H:%M:%S')] Predicting Future ..."
 python src/predict_the_future.py
 
