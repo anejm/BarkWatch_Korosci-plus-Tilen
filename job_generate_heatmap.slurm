@@ -41,33 +41,14 @@ else
     source venv/bin/activate
 fi
 
-# Verify required data exists before spending queue time
-for f in \
-    data/processed/splits/train.csv \
-    data/processed/splits/val.csv \
-    data/processed/splits/test.csv \
-    data/processed/target.csv; do
-    if [ ! -f "$f" ]; then
-        echo "ERROR: required file missing: $f"
-        echo "Run job_pipeline_and_train.slurm first."
-        exit 1
-    fi
-done
+# ---------------------------------------------------------------------------
+# Generate
+# ---------------------------------------------------------------------------
+echo "[$(date '+%H:%M:%S')] Predicting Future ..."
+python src/predict_the_future.py
 
-# ---------------------------------------------------------------------------
-# Train
-# ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running train.py ..."
-python src/training/train.py
+echo "[$(date '+%H:%M:%S')] Generating Heatmap ..."
+python src/utils/generating_heatmap_data.py
 
-# ---------------------------------------------------------------------------
-# Test inference
-# ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running testing.py ..."
-python src/training/testing.py
 
 echo "[$(date '+%H:%M:%S')] Job complete."
-echo ""
-echo "Artifacts ready for download:"
-echo "  scp <user>@hpc.arnes.si:$WORKDIR/models/xgb_models.pkl ."
-echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/predictions/predictions.csv ."
