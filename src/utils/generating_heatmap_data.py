@@ -1,26 +1,30 @@
 """
 generating_heatmap_data.py
 --------------------------
-Combines historical actual harvest data with future model predictions
-into a single flat table for heatmap visualization.
+Produces two flat tables for heatmap visualization:
 
-Historical actuals are reconstructed from target.csv: for each row
-(ggo, odsek, M) and horizon h_i, the actual harvest for month M+i is
-expm1(h_i). All 12 horizons are unpivoted and deduplicated so each
-(ggo, odsek_id, leto_mesec) appears exactly once.
+  heatmap_past_data.csv
+    Historical actual harvest reconstructed from target.csv.
+    For each row (ggo, odsek, M) and horizon h_i, the actual harvest for
+    month M+i is expm1(h_i). All 12 horizons are unpivoted and deduplicated
+    so each (ggo, odsek_id, leto_mesec) appears exactly once.
 
-Future predictions come from future_predictions.csv (output of
-predict_the_future.py): each h{i}_pred is the predicted harvest for
-base_month + i months.
+  heatmap_future_predictions.csv
+    Future predictions from future_predictions.csv (output of
+    predict_the_future.py). Each h{i}_pred is expanded to the predicted
+    harvest for base_month + i months.
+
+Both files share the schema:
+    Columns: ggo, odsek_id, leto_mesec, target, is_a_prediction
+    Ordered: ggo, odsek_id, leto_mesec
 
 Inputs:
   data/processed/target.csv               – actual h1..h12 (log1p space)
   data/predictions/future_predictions.csv – future predictions (m³)
 
-Output:
-  data/processed/heatmap.csv
-    Columns: ggo, odsek_id, leto_mesec, target, is_a_prediction
-    Ordered: ggo, odsek_id, leto_mesec
+Outputs:
+  data/processed/heatmap_past_data.csv
+  data/processed/heatmap_future_predictions.csv
 """
 
 import numpy as np
@@ -30,10 +34,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-ROOT        = Path(__file__).resolve().parents[2]
-TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
-FUTURE_PATH = ROOT / "data" / "predictions" / "future_predictions.csv"
-OUT_PATH    = ROOT / "data" / "processed" / "heatmap.csv"
+ROOT          = Path(__file__).resolve().parents[2]
+TARGET_PATH   = ROOT / "data" / "processed" / "target.csv"
+FUTURE_PATH   = ROOT / "data" / "predictions" / "future_predictions.csv"
+OUT_PAST      = ROOT / "data" / "processed" / "heatmap_past_data.csv"
+OUT_FUTURE    = ROOT / "data" / "processed" / "heatmap_future_predictions.csv"
 
 HORIZON = 12
 
@@ -74,7 +79,7 @@ def load_historical_actuals(target_path: Path) -> pd.DataFrame:
             .dt.to_period("M")
             .astype(str)
         )
-        tmp["target"]  = np.expm1(np.maximum(tmp[col], 0))
+        tmp["target"]   = np.expm1(np.maximum(tmp[col], 0))
         tmp["_horizon"] = i
         rows.append(tmp[["ggo", odsek_col, "leto_mesec", "target", "_horizon"]])
 
@@ -140,36 +145,33 @@ def main() -> None:
 
     print(f"Loading historical actuals from {TARGET_PATH.name} …")
     historical = load_historical_actuals(TARGET_PATH)
+    historical = (
+        historical
+        .sort_values(["ggo", "odsek_id", "leto_mesec"])
+        .reset_index(drop=True)
+        [["ggo", "odsek_id", "leto_mesec", "target", "is_a_prediction"]]
+    )
     print(f"  Rows: {len(historical):,}  |  "
           f"range: {historical['leto_mesec'].min()} → {historical['leto_mesec'].max()}")
 
     print(f"Expanding future predictions from {FUTURE_PATH.name} …")
     future = expand_future_predictions(FUTURE_PATH)
-    print(f"  Rows: {len(future):,}  |  "
-          f"range: {future['leto_mesec'].min()} → {future['leto_mesec'].max()}")
-
-    combined = pd.concat([historical, future], ignore_index=True)
-    # Priority: historical with valid target > prediction > historical with NaN target
-    combined["_target_is_nan"] = combined["target"].isna()
-    combined = (
-        combined
-        .sort_values(["ggo", "odsek_id", "leto_mesec", "_target_is_nan", "is_a_prediction"])
-        .drop_duplicates(subset=["ggo", "odsek_id", "leto_mesec"], keep="first")
-        .drop(columns="_target_is_nan")
+    future = (
+        future
         .sort_values(["ggo", "odsek_id", "leto_mesec"])
         .reset_index(drop=True)
         [["ggo", "odsek_id", "leto_mesec", "target", "is_a_prediction"]]
     )
+    print(f"  Rows: {len(future):,}  |  "
+          f"range: {future['leto_mesec'].min()} → {future['leto_mesec'].max()}")
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_csv(OUT_PATH, index=False)
+    OUT_PAST.parent.mkdir(parents=True, exist_ok=True)
 
-    n_actual = (~combined["is_a_prediction"]).sum()
-    n_pred   = combined["is_a_prediction"].sum()
-    print(f"\nHeatmap data saved → {OUT_PATH}  ({len(combined):,} rows)")
-    print(f"  Historical actuals : {n_actual:,}  (is_a_prediction=False)")
-    print(f"  Future predictions : {n_pred:,}  (is_a_prediction=True)")
-    print(f"  Full date range    : {combined['leto_mesec'].min()} → {combined['leto_mesec'].max()}")
+    historical.to_csv(OUT_PAST, index=False)
+    print(f"\nPast data saved   → {OUT_PAST}  ({len(historical):,} rows)")
+
+    future.to_csv(OUT_FUTURE, index=False)
+    print(f"Future data saved → {OUT_FUTURE}  ({len(future):,} rows)")
 
 
 if __name__ == "__main__":

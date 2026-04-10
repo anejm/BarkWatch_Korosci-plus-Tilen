@@ -1,17 +1,16 @@
 """
 predict_the_future.py
 ---------------------
-For each (ggo, odsek) in the test set, take the most recent row
-(the one with the latest leto_mesec — the last observed data point
-for which no actual future values exist yet) and run the trained
-sequential models to produce genuinely future h1..h12 predictions.
+Loads the current-state snapshot produced by extract_current_day_data.py
+(one row per (ggo, odsek), the most recent observed month) and runs the
+trained sequential models to produce genuinely future h1..h12 predictions.
 
 The h{i}_pred value corresponds to the harvest i months beyond the
 base leto_mesec for that odsek.
 
 Inputs:
   models/xgb_models.pkl
-  data/processed/splits/test.csv
+  data/processed/current_state.csv   ← run extract_current_day_data.py first
 
 Output:
   data/predictions/future_predictions.csv
@@ -21,6 +20,7 @@ Output:
     for base_month + i months.
 """
 
+import argparse
 import joblib
 import numpy as np
 import pandas as pd
@@ -29,12 +29,36 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-ROOT       = Path(__file__).resolve().parents[1]
-DATA_DIR   = ROOT / "data" / "processed" / "splits"
-MODEL_PATH = ROOT / "models" / "xgb_models.pkl"
-PRED_DIR   = ROOT / "data" / "predictions"
+ROOT         = Path(__file__).resolve().parents[1]
+CURRENT_PATH = ROOT / "data" / "processed" / "current_state.csv"
+MODEL_PATH   = ROOT / "models" / "xgb_models.pkl"
+PRED_DIR     = ROOT / "data" / "predictions"
 PRED_DIR.mkdir(parents=True, exist_ok=True)
-OUT_PATH   = PRED_DIR / "future_predictions.csv"
+OUT_PATH     = PRED_DIR / "future_predictions.csv"
+
+# ---------------------------------------------------------------------------
+# Scenario config
+# ---------------------------------------------------------------------------
+
+# Rainfall features scaled by a multiplier (malo=×0.25, veliko=×2.0)
+PADAVINE_COLS = [
+    "leto_padavine_skupaj_mm",
+    "leto_padavine_avg_mm",
+    "leto_dni_s_padavinami",
+    "leto_snezna_odeja_max_cm",
+    "leto_novi_sneg_skupaj_cm",
+    "leto_dni_s_snegom",
+]
+PADAVINE_SCALE = {"malo": 0.25, "normalno": 1.0, "veliko": 2.0}
+
+# Temperature features shifted by an offset in °C (nizko=−3 °C, visoko=+3 °C)
+TEMPERATURA_COLS = [
+    "leto_povp_T_avg",
+    "leto_max_T_mesec",
+    "leto_min_T_mesec",
+]
+TEMPERATURA_OFFSET = {"nizko": -3.0, "normalno": 0.0, "visoko": 3.0}
+
 
 # ---------------------------------------------------------------------------
 # Column config  (must match train.py / testing.py)
@@ -78,10 +102,13 @@ def _two_stage_predict(clf, reg, X: pd.DataFrame, threshold: float = 0.5) -> np.
     return clf_bin * reg_pred
 
 
-def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
+def predict(models: dict, X_base: pd.DataFrame, h1_multiplier: float = 1.0) -> np.ndarray:
     """
     Run sequential inference: h_i model receives base features + pred_h1..pred_h(i-1).
     Returns array of shape (n_rows, 12).
+
+    h1_multiplier: scale factor applied to the h1 prediction before it is
+                   fed into subsequent models (and stored in the output).
     """
     X_aug = X_base.copy()
     preds = np.zeros((len(X_base), 12))
@@ -99,6 +126,10 @@ def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
         X_aligned   = X_aug[feature_cols]
         preds[:, i] = _two_stage_predict(m["clf"], m["reg"], X_aligned, threshold)
 
+        # Apply h1 multiplier to the first horizon prediction
+        if i == 0 and h1_multiplier != 1.0:
+            preds[:, i] = preds[:, i] * h1_multiplier
+
         if i < 11:
             X_aug = X_aug.copy()
             X_aug[f"pred_{col}"] = preds[:, i]
@@ -107,42 +138,93 @@ def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate future harvest predictions with optional scenario overrides."
+    )
+    parser.add_argument(
+        "--h1",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help=(
+            "Multiply the h1 prediction from model 1 by this factor (0.0–5.0) "
+            "before feeding it into subsequent models. Default: 1.0 (no change)."
+        ),
+    )
+    parser.add_argument(
+        "--padavine",
+        choices=["malo", "normalno", "veliko"],
+        default="normalno",
+        help=(
+            "Rainfall scenario: 'malo' scales rainfall features to ×0.25, "
+            "'normalno' leaves them unchanged, 'veliko' scales them to ×2.0."
+        ),
+    )
+    parser.add_argument(
+        "--temperatura",
+        choices=["nizko", "normalno", "visoko"],
+        default="normalno",
+        help=(
+            "Temperature scenario: 'nizko' subtracts 3 °C from temperature features, "
+            "'normalno' leaves them unchanged, 'visoko' adds 3 °C."
+        ),
+    )
+    args = parser.parse_args()
+    if not (0.0 <= args.h1 <= 5.0):
+        parser.error(f"--h1 must be between 0.0 and 5.0, got {args.h1}")
+    return args
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    args = parse_args()
+
     print(f"Loading models from {MODEL_PATH} …")
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
     models: dict = joblib.load(MODEL_PATH)
     print(f"  Loaded {len(models)} horizon models: {list(models.keys())}")
 
-    test_path = DATA_DIR / "test.csv"
-    if not test_path.exists():
-        raise FileNotFoundError(f"Test file not found: {test_path}")
-    print(f"\nLoading test set from {test_path.name} …")
-    test_x = pd.read_csv(test_path, low_memory=False)
-    print(f"  Total test rows: {len(test_x):,}")
+    if not CURRENT_PATH.exists():
+        raise FileNotFoundError(
+            f"Current state file not found: {CURRENT_PATH}\n"
+            "Run extract_current_day_data.py first."
+        )
+    print(f"\nLoading current state from {CURRENT_PATH.name} …")
+    current = pd.read_csv(CURRENT_PATH, low_memory=False)
+    print(f"  Rows: {len(current):,}")
+    print(f"  Base months range: {current['leto_mesec'].min()} → {current['leto_mesec'].max()}")
 
-    # For each (ggo, odsek), keep only the row with the maximum leto_mesec.
-    # This is the last observed data point — the most recent state of each
-    # odsek for which no actual future harvest values exist yet.
-    group_keys = [c for c in ["ggo", "odsek"] if c in test_x.columns]
-    last_rows = (
-        test_x
-        .sort_values("leto_mesec")
-        .groupby(group_keys, sort=False)
-        .tail(1)
-        .reset_index(drop=True)
-    )
-    print(f"  Unique (ggo, odsek) pairs selected (last row each): {len(last_rows):,}")
-    print(f"  Base months range: {last_rows['leto_mesec'].min()} → {last_rows['leto_mesec'].max()}")
-
-    id_df, X_base = prepare_features(last_rows)
+    id_df, X_base = prepare_features(current)
     print(f"  Base features: {X_base.shape[1]}")
 
+    # ------------------------------------------------------------------
+    # Apply scenario overrides
+    # ------------------------------------------------------------------
+    if args.padavine != "normalno":
+        scale = PADAVINE_SCALE[args.padavine]
+        cols_present = [c for c in PADAVINE_COLS if c in X_base.columns]
+        X_base[cols_present] = X_base[cols_present] * scale
+        print(f"\nPadavine scenario '{args.padavine}': scaled {len(cols_present)} rainfall features by ×{scale}")
+
+    if args.temperatura != "normalno":
+        offset = TEMPERATURA_OFFSET[args.temperatura]
+        cols_present = [c for c in TEMPERATURA_COLS if c in X_base.columns]
+        X_base[cols_present] = X_base[cols_present] + offset
+        print(f"Temperatura scenario '{args.temperatura}': shifted {len(cols_present)} temperature features by {offset:+.1f} °C")
+
+    if args.h1 != 1.0:
+        print(f"H1 multiplier: ×{args.h1}")
+
     print("\nRunning sequential inference …")
-    preds = predict(models, X_base)
+    preds = predict(models, X_base, h1_multiplier=args.h1)
 
     # Convert from log1p space to m³ (matching predictions.csv convention)
     preds_m3 = np.expm1(np.maximum(preds, 0))
@@ -153,7 +235,7 @@ def main() -> None:
     )
     out.to_csv(OUT_PATH, index=False)
     print(f"\nFuture predictions saved → {OUT_PATH}  ({len(out):,} rows, values in m³)")
-    print("  Each h{{i}}_pred corresponds to base leto_mesec + i months.")
+    print("  Each h{i}_pred corresponds to base leto_mesec + i months.")
 
 
 if __name__ == "__main__":
