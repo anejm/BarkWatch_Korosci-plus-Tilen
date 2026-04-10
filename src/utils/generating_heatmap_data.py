@@ -148,8 +148,14 @@ def main() -> None:
     print(f"  Rows: {len(future):,}  |  "
           f"range: {future['leto_mesec'].min()} → {future['leto_mesec'].max()}")
 
+    combined = pd.concat([historical, future], ignore_index=True)
+    # Priority: historical with valid target > prediction > historical with NaN target
+    combined["_target_is_nan"] = combined["target"].isna()
     combined = (
-        pd.concat([historical, future], ignore_index=True)
+        combined
+        .sort_values(["ggo", "odsek_id", "leto_mesec", "_target_is_nan", "is_a_prediction"])
+        .drop_duplicates(subset=["ggo", "odsek_id", "leto_mesec"], keep="first")
+        .drop(columns="_target_is_nan")
         .sort_values(["ggo", "odsek_id", "leto_mesec"])
         .reset_index(drop=True)
         [["ggo", "odsek_id", "leto_mesec", "target", "is_a_prediction"]]
