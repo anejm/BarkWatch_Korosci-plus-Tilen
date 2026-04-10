@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=96G
+#SBATCH --mem=32G
 #SBATCH --partition=all
 
 # Use this script when the pipeline has already been run and
