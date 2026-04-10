@@ -100,8 +100,7 @@ CLF_PARAMS = dict(
 # overfitting: the regressor sees only ~166K non-zero rows with 304 features,
 # so deep unconstrained trees overfit badly.
 REG_PARAMS = dict(
-    **COMMON,
-    max_depth=4,
+    **{**COMMON, "max_depth": 4},   # override COMMON's max_depth=6 → 4
     min_child_weight=5,
     reg_lambda=2.0,
     eval_metric="rmse",
