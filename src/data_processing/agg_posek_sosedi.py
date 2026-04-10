@@ -182,8 +182,14 @@ def main():
                 elif fn == "median":
                     agg_parts.append(s.median().rename(f"sosedi_{col}_median"))
 
-        # Count neighbors that have non-null target
-        count_s = grp["target"].count().rename("sosedi_st_sosedov")
+        # Count neighbors that have any data (use target if available, else any lag col)
+        count_col = "target" if "target" in joined.columns else next(
+            (c for c in AGG_SPEC if c in joined.columns), None
+        )
+        if count_col is not None:
+            count_s = grp[count_col].count().rename("sosedi_st_sosedov")
+        else:
+            count_s = grp.size().rename("sosedi_st_sosedov")
         agg_parts.append(count_s)
 
         month_df = pd.concat(agg_parts, axis=1).reset_index()
