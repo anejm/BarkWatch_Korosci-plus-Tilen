@@ -82,19 +82,28 @@ COMMON = dict(
     early_stopping_rounds=50,
 )
 
-# No scale_pos_weight — we compensate via threshold tuning instead.
-# scale_pos_weight with spw=n_neg/n_pos (often 10-20x) caused the classifier
-# to predict "nonzero" for nearly all rows → systematic positive bias ≈ 6.7
-# in log1p space. Threshold tuning gives a cleaner operating point on the
-# precision-recall curve without the global positive shift.
-CLF_PARAMS = dict(**COMMON, eval_metric="logloss")
+# scale_pos_weight is set per-horizon in the training loop (n_neg/n_pos).
+# This helps the classifier learn the minority class better.
+# Systematic positive bias is avoided by tuning the threshold to maximise F1
+# on the validation set rather than just matching the positive rate.
+CLF_PARAMS = dict(
+    **COMMON,
+    eval_metric="aucpr",   # area under PR curve — better signal for imbalanced data
+)
 
 # reg:squarederror is appropriate because targets are in log1p space
 # (approximately Gaussian). reg:tweedie is designed for raw count data with
 # a specific variance structure; applying it to log1p-transformed values
 # double-transforms the data.
+#
+# Reduced max_depth (6→4) and added min_child_weight/reg_lambda to prevent
+# overfitting: the regressor sees only ~166K non-zero rows with 304 features,
+# so deep unconstrained trees overfit badly.
 REG_PARAMS = dict(
     **COMMON,
+    max_depth=4,
+    min_child_weight=5,
+    reg_lambda=2.0,
     eval_metric="rmse",
     objective="reg:squarederror",
 )
@@ -197,26 +206,24 @@ def prepare_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
 
 def find_threshold(clf, X_val: pd.DataFrame, y_val_bin: np.ndarray) -> float:
     """
-    Find the classifier probability threshold that makes the predicted positive
-    rate match the actual positive rate on the validation set.
-
-    This cancels out the effect of scale_pos_weight (or any classifier bias)
-    on the final positive/negative split, eliminating systematic bias in the
-    two-stage prediction.
+    Find the classifier probability threshold that maximises F1 on the
+    validation set.  This gives a better operating point on the
+    precision-recall curve than simply matching the positive rate, and it
+    still corrects for any scale_pos_weight bias because the threshold is
+    calibrated on held-out data.
 
     Returns the best threshold in [0.01, 0.99].
     """
     probs = clf.predict_proba(X_val)[:, 1]
-    actual_pos_rate = float(y_val_bin.mean())
 
     best_thresh = 0.5
-    best_gap    = float("inf")
+    best_f1     = -1.0
 
     for thresh in np.linspace(0.01, 0.99, 99):
-        pred_pos_rate = float((probs >= thresh).mean())
-        gap = abs(pred_pos_rate - actual_pos_rate)
-        if gap < best_gap:
-            best_gap    = gap
+        pred_bin = (probs >= thresh).astype(int)
+        f1 = f1_score(y_val_bin, pred_bin, zero_division=0)
+        if f1 > best_f1:
+            best_f1     = f1
             best_thresh = float(thresh)
 
     return best_thresh
@@ -268,10 +275,13 @@ def train(short: bool) -> None:
               f"actual_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
 
         # ── Stage 1: classifier ──────────────────────────────────────────────
-        clf = XGBClassifier(**CLF_PARAMS)
+        # scale_pos_weight helps the classifier learn the sparse positive class;
+        # systematic positive bias is removed by the F1-optimising threshold below.
+        spw = n_neg / max(n_pos, 1)
+        clf = XGBClassifier(**CLF_PARAMS, scale_pos_weight=spw)
         clf.fit(X_tr, y_tr_bin, eval_set=[(X_v, y_v_bin)], verbose=False)
 
-        # Tune threshold to match actual positive rate (eliminates systematic bias)
+        # Tune threshold to maximise F1 on validation set
         threshold = find_threshold(clf, X_v, y_v_bin)
 
         clf_pred_bin = (clf.predict_proba(X_v)[:, 1] >= threshold).astype(int)
