@@ -118,17 +118,23 @@ def preprocess() -> pl.DataFrame:
     monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
     monthly = _add_lag_features(monthly)
 
+    # Excluded from features:
+    #   - target / log1p_target: current-month harvest; causes leakage because
+    #     train.py can't reliably drop it when it's embedded in the feature CSV.
+    #     The lagged features (lag_1, lag_3, …) already encode past activity.
+    #   - leto (year): acts as a trend proxy that encourages extrapolation
+    #     beyond the training period. Calendar seasonality is captured by
+    #     mesec_sin / mesec_cos; long-term trend is captured by expanding_mean.
+    #   - datum: raw date string, superseded by leto_mesec.
     feature_cols = (
-        ["ggo", "odsek", "datum", "leto_mesec", "leto",
+        ["ggo", "odsek", "leto_mesec",
          "mesec_sin", "mesec_cos",
-         "target", "log1p_target", "diff_1", "expanding_mean"]
+         "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
         + [f"rolling_mean_{w}" for w in WINDOWS]
         + [f"rolling_std_{w}"  for w in WINDOWS]
     )
     out = monthly[feature_cols].reset_index(drop=True)
-    # Convert datum to string for polars compatibility
-    out["datum"] = out["datum"].astype(str)
     return pl.from_pandas(out)
 
 
@@ -185,9 +191,9 @@ def main():
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["ggo", "odsek", "datum", "leto_mesec", "leto",
+        ["ggo", "odsek", "leto_mesec",
          "mesec_sin", "mesec_cos",
-         "target", "log1p_target", "diff_1", "expanding_mean"]
+         "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
         + [f"rolling_mean_{w}" for w in WINDOWS]
         + [f"rolling_std_{w}"  for w in WINDOWS]

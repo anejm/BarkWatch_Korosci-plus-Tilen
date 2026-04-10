@@ -41,11 +41,12 @@ POSTAJE_IN  = ROOT / "data" / "processed" / "najblizji_odseki_postaje.csv"
 POSEK_IN    = ROOT / "data" / "processed" / "posek_processed.csv"
 OUT_PATH    = ROOT / "data" / "processed" / "agg_posek_sosedi.csv"
 
-# Columns from posek_processed to aggregate over neighbors
-# Format: col_name -> list of aggregation functions
+# Columns from posek_processed to aggregate over neighbors.
+# Only use lagged/rolled features — NOT the contemporaneous 'target' or
+# 'log1p_target', which represent the CURRENT month's harvest and would
+# not be available at prediction time. Lag_1 corresponds to the previous
+# month's neighbour harvest, which is a safe leading indicator.
 AGG_SPEC = {
-    "target":          ["sum", "mean", "std", "median"],
-    "log1p_target":    ["mean"],
     "lag_1":           ["sum", "mean"],
     "lag_3":           ["sum", "mean"],
     "lag_6":           ["sum", "mean"],
@@ -56,7 +57,7 @@ AGG_SPEC = {
     "rolling_std_12":  ["mean"],
 }
 
-POSEK_COLS = ["ggo", "odsek", "leto_mesec"] + list(AGG_SPEC.keys())
+POSEK_COLS = ["ggo", "odsek", "leto_mesec", "target"] + list(AGG_SPEC.keys())
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,12 @@ PRED_PATH   = PRED_DIR / "predictions.csv"
 # Column config  (must match train.py)
 # ---------------------------------------------------------------------------
 POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
-DROP_COLS     = ["datum", "leto", "target", "log1p_target"]
+DROP_COLS     = [
+    "datum", "leto", "target", "log1p_target",
+    "sosedi_target_sum", "sosedi_target_mean",
+    "sosedi_target_std", "sosedi_target_median",
+    "sosedi_log1p_target_mean",
+]
 TARGET_COLS   = [f"h{h}" for h in range(1, 13)]
 PRED_COLS     = [f"h{h}_pred" for h in range(1, 13)]
 
@@ -73,27 +78,25 @@ def load_test(short: bool) -> pd.DataFrame:
 
 
 def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split test into (id_df, X_base), dropping NaN-feature rows."""
+    """Split test into (id_df, X_base), filling NaN features with 0."""
     id_cols   = [c for c in POSSIBLE_KEYS if c in test_x.columns]
     drop_cols = [c for c in DROP_COLS + TARGET_COLS if c in test_x.columns]
-    feat_cols = [c for c in test_x.columns if c not in id_cols + drop_cols]
+    feat_cols = [c for c in test_x.columns if c not in set(id_cols + drop_cols)]
 
     id_df = test_x[id_cols].reset_index(drop=True)
     X     = test_x[feat_cols].reset_index(drop=True)
 
-    valid   = X.notna().all(axis=1)
-    dropped = (~valid).sum()
-    if dropped:
-        print(f"  Dropped {dropped:,} rows with NaN features")
+    nan_cols = X.columns[X.isna().any()].tolist()
+    if nan_cols:
+        print(f"  Filling NaN in {len(nan_cols)} columns with 0")
+        X = X.fillna(0)
 
-    return (
-        id_df[valid].reset_index(drop=True),
-        X[valid].reset_index(drop=True),
-    )
+    return id_df, X
 
 
-def _two_stage_predict(clf, reg, X: pd.DataFrame) -> np.ndarray:
-    clf_bin  = clf.predict(X)
+def _two_stage_predict(clf, reg, X: pd.DataFrame, threshold: float = 0.5) -> np.ndarray:
+    clf_prob = clf.predict_proba(X)[:, 1]
+    clf_bin  = (clf_prob >= threshold).astype(int)
     reg_pred = np.maximum(reg.predict(X), 0)
     return clf_bin * reg_pred
 
@@ -113,6 +116,7 @@ def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
     for i, col in enumerate(TARGET_COLS):
         m = models[col]
         feature_cols = m["feature_cols"]
+        threshold    = m.get("threshold", 0.5)
 
         # Add any missing prediction columns as zeros
         # (shouldn't happen in normal flow, but guards against edge cases)
@@ -121,7 +125,7 @@ def predict(models: dict, X_base: pd.DataFrame) -> np.ndarray:
                 X_aug[fc] = 0.0
 
         X_aligned    = X_aug[feature_cols]
-        preds[:, i]  = _two_stage_predict(m["clf"], m["reg"], X_aligned)
+        preds[:, i]  = _two_stage_predict(m["clf"], m["reg"], X_aligned, threshold)
 
         # Augment for next horizon
         if i < 11:
@@ -209,13 +213,17 @@ def main() -> None:
 
     evaluate(preds, id_df, test_x)
 
-    # Save predictions
+    # Convert predictions to original m³ space before saving.
+    # Models output log1p-transformed values (targets in target.csv are log1p).
+    # Saving in m³ makes predictions.csv directly interpretable and consistent
+    # with what evaluate() reports (which also applies expm1).
+    preds_m3 = np.expm1(np.maximum(preds, 0))
     out = pd.concat(
-        [id_df, pd.DataFrame(preds, columns=PRED_COLS)],
+        [id_df, pd.DataFrame(preds_m3, columns=PRED_COLS)],
         axis=1,
     )
     out.to_csv(PRED_PATH, index=False)
-    print(f"\nPredictions saved → {PRED_PATH}  ({len(out):,} rows)")
+    print(f"\nPredictions saved → {PRED_PATH}  ({len(out):,} rows, values in m³)")
 
 
 if __name__ == "__main__":

@@ -74,7 +74,8 @@ def step_preprocess():
     the resulting polars DataFrames.
 
     Intermediate files written:
-      data/processed/posek_processed.csv
+      data/processed/posek_processed.csv   — feature table (no raw target col)
+      data/processed/target.csv            — 12-horizon target matrix (log1p)
       data/processed/odseki_processed.csv
       data/processed/sestoji_processed.csv
       data/processed/vreme_mesecno.csv
@@ -87,6 +88,12 @@ def step_preprocess():
     posek_df.write_csv(PROCESSED_DIR / "posek_processed.csv")
     log.info(f"  [posek] {posek_df.shape[0]:,} rows × {posek_df.shape[1]} cols "
              f"→ posek_processed.csv")
+
+    log.info("  [posek] building 12-horizon target matrix...")
+    target_df = posek_processing.make_target()
+    target_df.write_csv(PROCESSED_DIR / "target.csv")
+    log.info(f"  [posek] {target_df.shape[0]:,} rows × {target_df.shape[1]} cols "
+             f"→ target.csv")
 
     log.info("  [odseki] loading forest compartment GeoPackage...")
     odseki_df = odseki_processing.preprocess()

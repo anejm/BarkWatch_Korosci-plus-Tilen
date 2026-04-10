@@ -6,18 +6,21 @@ Sequential two-stage model per horizon (h1..h12).
 For each horizon h_i:
   Features   = base features  +  predictions from models h1..h(i-1)
   Stage 1    = XGBClassifier  → is h_i zero or non-zero?
+               Threshold is tuned on val set to match actual positive rate
+               (eliminates the systematic positive bias from scale_pos_weight).
   Stage 2    = XGBRegressor   → magnitude, trained only on non-zero rows
-  Prediction = clf_output * max(reg_output, 0)
+  Prediction = (prob >= threshold) * max(reg_output, 0)
 
 Inputs:
-  data/train.csv  (or data/train_short.csv with --short)
-  data/val.csv    (or data/val_short.csv   with --short)
-  data/processed/target.csv  — columns: ggo, odsek, leto_mesec, h1..h12
+  data/processed/splits/train.csv  (or train_short.csv with --short)
+  data/processed/splits/val.csv    (or val_short.csv   with --short)
+  data/processed/target.csv        — columns: ggo, odsek, leto_mesec, h1..h12
+                                     (targets are in log1p space)
 
 Output:
   models/xgb_models.pkl
     dict: horizon -> {"clf": XGBClassifier, "reg": XGBRegressor,
-                      "feature_cols": [col, ...]}
+                      "threshold": float, "feature_cols": [col, ...]}
 """
 
 import argparse
@@ -48,7 +51,20 @@ MODEL_PATH = MODELS_DIR / "xgb_models.pkl"
 # Column config
 # ---------------------------------------------------------------------------
 POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
-DROP_COLS     = ["datum", "leto", "target", "log1p_target"]
+
+# Columns to drop from features:
+#   - datum / leto_mesec string / leto: date identifiers or temporal trend
+#     (leto encourages extrapolation beyond training years)
+#   - target / log1p_target: current-month harvest leaks into lag_0 position;
+#     lag_1 already captures the previous month, which is safer for inference
+#   - sosedi_target_* / sosedi_log1p_target_mean: contemporaneous neighbour
+#     harvest — not available at prediction time
+DROP_COLS = [
+    "datum", "leto", "target", "log1p_target",
+    "sosedi_target_sum", "sosedi_target_mean",
+    "sosedi_target_std", "sosedi_target_median",
+    "sosedi_log1p_target_mean",
+]
 TARGET_COLS   = [f"h{h}" for h in range(1, 13)]
 
 # ---------------------------------------------------------------------------
@@ -66,12 +82,21 @@ COMMON = dict(
     early_stopping_rounds=50,
 )
 
+# No scale_pos_weight — we compensate via threshold tuning instead.
+# scale_pos_weight with spw=n_neg/n_pos (often 10-20x) caused the classifier
+# to predict "nonzero" for nearly all rows → systematic positive bias ≈ 6.7
+# in log1p space. Threshold tuning gives a cleaner operating point on the
+# precision-recall curve without the global positive shift.
 CLF_PARAMS = dict(**COMMON, eval_metric="logloss")
+
+# reg:squarederror is appropriate because targets are in log1p space
+# (approximately Gaussian). reg:tweedie is designed for raw count data with
+# a specific variance structure; applying it to log1p-transformed values
+# double-transforms the data.
 REG_PARAMS = dict(
     **COMMON,
     eval_metric="rmse",
-    objective="reg:tweedie",
-    tweedie_variance_power=1.5,
+    objective="reg:squarederror",
 )
 
 
@@ -126,6 +151,15 @@ def load_and_merge(short: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
     if len(target_cols_present) != 12:
         raise ValueError(f"target.csv is missing horizon columns; found: {target_cols_present}")
 
+    # Drop target horizon columns from X if they already exist (avoids _x/_y suffixes)
+    for df in (train_x, val_x):
+        overlap = [c for c in TARGET_COLS if c in df.columns]
+        if overlap:
+            print(f"  WARNING: feature CSV already contains horizon cols {overlap} — dropping before merge")
+            train_x = train_x.drop(columns=[c for c in overlap if c in train_x.columns])
+            val_x   = val_x.drop(  columns=[c for c in overlap if c in val_x.columns])
+            break
+
     train = train_x.merge(targets[keys + TARGET_COLS], on=keys, how="inner")
     val   = val_x.merge(  targets[keys + TARGET_COLS], on=keys, how="inner")
 
@@ -136,30 +170,61 @@ def load_and_merge(short: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
 def prepare_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Split a merged dataframe into (id_df, X_base, y).
-    Drops rows with NaN features.
+    NaN features are filled with 0 (rolling/lag features have NaN at series start).
     """
     id_cols   = [c for c in POSSIBLE_KEYS if c in df.columns]
     drop_cols = [c for c in DROP_COLS if c in df.columns]
-    feat_cols = [c for c in df.columns if c not in id_cols + drop_cols + TARGET_COLS]
+    feat_cols = [c for c in df.columns if c not in set(id_cols + drop_cols + TARGET_COLS)]
+
+    # Report any dropped leaky columns
+    if drop_cols:
+        print(f"    Dropping columns: {drop_cols}")
 
     id_df = df[id_cols].reset_index(drop=True)
     X     = df[feat_cols].reset_index(drop=True)
     y     = df[TARGET_COLS].reset_index(drop=True)
 
-    valid   = X.notna().all(axis=1)
-    dropped = (~valid).sum()
-    if dropped:
-        print(f"    Dropped {dropped:,} rows with NaN features")
+    # Fill NaN with 0 instead of dropping rows.
+    # Rolling and lag features are NaN at the start of each odsek time series;
+    # dropping entire rows wastes data and biases toward odseki with long histories.
+    nan_cols = X.columns[X.isna().any()].tolist()
+    if nan_cols:
+        print(f"    Filling NaN in {len(nan_cols)} columns with 0 (lag/rolling start-of-series)")
+        X = X.fillna(0)
 
-    return (
-        id_df[valid].reset_index(drop=True),
-        X[valid].reset_index(drop=True),
-        y[valid].reset_index(drop=True),
-    )
+    return id_df, X, y
 
 
-def _two_stage_predict(clf, reg, X: pd.DataFrame) -> np.ndarray:
-    clf_bin  = clf.predict(X)
+def find_threshold(clf, X_val: pd.DataFrame, y_val_bin: np.ndarray) -> float:
+    """
+    Find the classifier probability threshold that makes the predicted positive
+    rate match the actual positive rate on the validation set.
+
+    This cancels out the effect of scale_pos_weight (or any classifier bias)
+    on the final positive/negative split, eliminating systematic bias in the
+    two-stage prediction.
+
+    Returns the best threshold in [0.01, 0.99].
+    """
+    probs = clf.predict_proba(X_val)[:, 1]
+    actual_pos_rate = float(y_val_bin.mean())
+
+    best_thresh = 0.5
+    best_gap    = float("inf")
+
+    for thresh in np.linspace(0.01, 0.99, 99):
+        pred_pos_rate = float((probs >= thresh).mean())
+        gap = abs(pred_pos_rate - actual_pos_rate)
+        if gap < best_gap:
+            best_gap    = gap
+            best_thresh = float(thresh)
+
+    return best_thresh
+
+
+def _two_stage_predict(clf, reg, X: pd.DataFrame, threshold: float = 0.5) -> np.ndarray:
+    clf_prob = clf.predict_proba(X)[:, 1]
+    clf_bin  = (clf_prob >= threshold).astype(int)
     reg_pred = np.maximum(reg.predict(X), 0)
     return clf_bin * reg_pred
 
@@ -193,25 +258,28 @@ def train(short: bool) -> None:
         y_tr = y_train[col].values
         y_v  = y_val[col].values
 
-        # Binary labels for classifier
+        # Binary labels for classifier (nonzero in log1p space)
         y_tr_bin = (y_tr > 0).astype(int)
         y_v_bin  = (y_v  > 0).astype(int)
 
         n_neg = int((y_tr_bin == 0).sum())
         n_pos = int((y_tr_bin == 1).sum())
-        spw   = n_neg / max(n_pos, 1)
+        print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  "
+              f"actual_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
 
         # ── Stage 1: classifier ──────────────────────────────────────────────
-        print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  spw={spw:.1f} …", end=" ", flush=True)
-
-        clf = XGBClassifier(**CLF_PARAMS, scale_pos_weight=spw)
+        clf = XGBClassifier(**CLF_PARAMS)
         clf.fit(X_tr, y_tr_bin, eval_set=[(X_v, y_v_bin)], verbose=False)
 
-        clf_pred_bin = clf.predict(X_v)
+        # Tune threshold to match actual positive rate (eliminates systematic bias)
+        threshold = find_threshold(clf, X_v, y_v_bin)
+
+        clf_pred_bin = (clf.predict_proba(X_v)[:, 1] >= threshold).astype(int)
         f1  = f1_score(y_v_bin, clf_pred_bin, zero_division=0)
         pre = precision_score(y_v_bin, clf_pred_bin, zero_division=0)
         rec = recall_score(y_v_bin, clf_pred_bin, zero_division=0)
-        print(f"best={clf.best_iteration}  F1={f1:.3f}  P={pre:.3f}  R={rec:.3f}")
+        print(f"best={clf.best_iteration}  thresh={threshold:.2f}  "
+              f"F1={f1:.3f}  P={pre:.3f}  R={rec:.3f}")
 
         # ── Stage 2: regressor on non-zero rows ──────────────────────────────
         nz_tr = y_tr > 0
@@ -226,35 +294,47 @@ def train(short: bool) -> None:
                 verbose=False,
             )
         else:
-            # No non-zero val rows: train without early stopping
             reg_params_no_es = {k: v for k, v in REG_PARAMS.items()
                                 if k != "early_stopping_rounds"}
             reg = XGBRegressor(**reg_params_no_es)
             reg.fit(X_tr[nz_tr], y_tr[nz_tr], verbose=False)
 
-        combined_v = _two_stage_predict(clf, reg, X_v)
+        combined_v = _two_stage_predict(clf, reg, X_v, threshold)
         mae_nz = (mean_absolute_error(y_v[nz_v], combined_v[nz_v])
                   if nz_v.sum() > 0 else float("nan"))
 
+        # Bias check: positive bias means model over-predicts zeros
+        bias = float(np.mean(combined_v - y_v))
         best_it = getattr(reg, "best_iteration", "n/a")
-        print(f"best={best_it}  non-zero MAE={mae_nz:.4f}  {time.time()-t0:.1f}s")
+        print(f"best={best_it}  non-zero MAE={mae_nz:.4f}  bias={bias:.4f}  "
+              f"{time.time()-t0:.1f}s")
 
         models[col] = {
             "clf":          clf,
             "reg":          reg,
+            "threshold":    threshold,
             "feature_cols": list(X_tr.columns),
         }
 
         # ── Augment features for next horizon ────────────────────────────────
-        # Predictions on train set (using current augmented X) become a feature
-        # for subsequent horizon models — mirrors inference behaviour.
+        # NOTE: using the model's own training-set predictions as features
+        # for the next horizon creates a training-time advantage — the model
+        # has already seen training rows so pred_h{i} ≈ actual h{i} on train.
+        # At test time pred_h{i} is noisier, causing covariate shift.
+        # Proper fix = out-of-fold predictions (complex); for now we add
+        # small Gaussian noise to training pred_h{i} to partially simulate
+        # the test-time prediction error and reduce over-reliance.
         if i < 11:
-            tr_preds = _two_stage_predict(clf, reg, X_tr)
-            v_preds  = _two_stage_predict(clf, reg, X_v)
+            tr_preds = _two_stage_predict(clf, reg, X_tr, threshold)
+            v_preds  = _two_stage_predict(clf, reg, X_v,  threshold)
             pred_col = f"pred_{col}"
             X_tr = X_tr.copy()
             X_v  = X_v.copy()
-            X_tr[pred_col] = tr_preds
+            # Add noise proportional to training prediction std to partially
+            # break the train-set optimism (val set stays clean)
+            tr_noise_scale = float(np.std(tr_preds)) * 0.1
+            rng = np.random.default_rng(seed=42 + i)
+            X_tr[pred_col] = tr_preds + rng.normal(0, tr_noise_scale, size=len(tr_preds))
             X_v[pred_col]  = v_preds
 
     print(f"\nTotal training time: {(time.time() - t_total) / 60:.1f} min")
@@ -267,7 +347,7 @@ def train(short: bool) -> None:
     for i, col in enumerate(TARGET_COLS):
         m = models[col]
         X_aligned = X_v_eval[m["feature_cols"]]
-        preds_i = _two_stage_predict(m["clf"], m["reg"], X_aligned)
+        preds_i = _two_stage_predict(m["clf"], m["reg"], X_aligned, m["threshold"])
         val_preds[:, i] = preds_i
         if i < 11:
             X_v_eval = X_v_eval.copy()
@@ -277,14 +357,15 @@ def train(short: bool) -> None:
     mae  = mean_absolute_error(y_val_arr, val_preds)
     rmse = root_mean_squared_error(y_val_arr, val_preds)
     nz   = y_val_arr > 0
+    bias_overall = float(np.mean(val_preds - y_val_arr))
 
-    print(f"\nVal metrics (all 12 horizons):")
-    print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}")
+    print(f"\nVal metrics (all 12 horizons, log1p space):")
+    print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}   Bias: {bias_overall:.4f}")
     if nz.sum():
         print(f"  Non-zero — MAE: {mean_absolute_error(y_val_arr[nz], val_preds[nz]):.4f}"
               f"   RMSE: {root_mean_squared_error(y_val_arr[nz], val_preds[nz]):.4f}")
 
-    print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}")
+    print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}  {'Bias':>10s}")
     for i, col in enumerate(TARGET_COLS):
         yt = y_val_arr[:, i]
         yp = val_preds[:, i]
@@ -292,7 +373,8 @@ def train(short: bool) -> None:
         mae_col  = mean_absolute_error(yt, yp)
         rmse_col = root_mean_squared_error(yt, yp)
         mae_nz   = mean_absolute_error(yt[nz_col], yp[nz_col]) if nz_col.sum() else float("nan")
-        print(f"  {col:4s}  {mae_col:10.4f}  {mae_nz:10.4f}  {rmse_col:10.4f}")
+        bias_col = float(np.mean(yp - yt))
+        print(f"  {col:4s}  {mae_col:10.4f}  {mae_nz:10.4f}  {rmse_col:10.4f}  {bias_col:10.4f}")
 
     # ── Save ─────────────────────────────────────────────────────────────────
     joblib.dump(models, MODEL_PATH)
