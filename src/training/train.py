@@ -100,7 +100,7 @@ CLF_PARAMS = dict(
 # overfitting: the regressor sees only ~166K non-zero rows with 304 features,
 # so deep unconstrained trees overfit badly.
 REG_PARAMS = dict(
-    **{**COMMON, "max_depth": 4},   # override COMMON's max_depth=6 → 4
+    **{**COMMON, "max_depth": 4, "n_estimators": 2000},  # override depth and cap
     min_child_weight=5,
     reg_lambda=2.0,
     eval_metric="rmse",
@@ -274,9 +274,11 @@ def train(short: bool) -> None:
               f"actual_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
 
         # ── Stage 1: classifier ──────────────────────────────────────────────
-        # scale_pos_weight helps the classifier learn the sparse positive class;
-        # systematic positive bias is removed by the F1-optimising threshold below.
-        spw = n_neg / max(n_pos, 1)
+        # scale_pos_weight gives the classifier a gentle push toward the minority
+        # class. Using sqrt(n_neg/n_pos) ≈ 4x rather than the full ratio ≈ 16x
+        # avoids flooding the pipeline with false positives (which inflates bias).
+        # Systematic positive bias is removed by the F1-optimising threshold below.
+        spw = np.sqrt(n_neg / max(n_pos, 1))
         clf = XGBClassifier(**CLF_PARAMS, scale_pos_weight=spw)
         clf.fit(X_tr, y_tr_bin, eval_set=[(X_v, y_v_bin)], verbose=False)
 
