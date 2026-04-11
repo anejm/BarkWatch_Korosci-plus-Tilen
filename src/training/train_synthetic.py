@@ -73,6 +73,11 @@ REG_PARAMS = dict(
     subsample_freq=1,
     colsample_bytree=0.6,
     reg_lambda=2.0,
+    # Memory optimisations for large synthetic datasets (8M+ rows, 100+ cols):
+    #   max_bin=127  → halves the per-feature bin array vs. the default 255
+    #   force_col_wise=True → avoids an internal transposed copy on wide data
+    max_bin=127,
+    force_col_wise=True,
     random_state=42,
     n_jobs=-1,
     verbose=-1,
