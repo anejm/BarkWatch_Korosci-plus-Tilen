@@ -5,6 +5,7 @@
 requests
 numpy
 pandas
+scipy
 geopandas
 shapely
 pyproj
