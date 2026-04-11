@@ -4,9 +4,12 @@ synthetic_pipeline.py
 Orchestrates the synthetic BarkWatch data pipeline:
 
   1. Preprocess  – feature-engineer synthetic bark beetle timeseries
-  2. Export      – split into train_synthetic / val_synthetic / test_synthetic
+  2. Aggregate   – build relationship tables (weather join, neighbour join,
+                   odseki+sestoji join) — reuses the same agg modules as pipeline.py
+  3. Join        – combine all tables into one feature-rich dataset
+  4. Export      – split into train_synthetic / val_synthetic / test_synthetic
 
-Mirrors the structure of pipeline.py but operates entirely on synthetic data
+Mirrors the structure of pipeline.py but operates on synthetic bark beetle data
 produced by generating_synthetic_data/synthetic_pipeline.py.
 
 Usage:
@@ -45,7 +48,6 @@ TRAIN_CUTOFF_YEAR = 2020   # train:  leto  <  TRAIN_CUTOFF_YEAR
 VAL_CUTOFF_YEAR   = 2022   # val:    TRAIN_CUTOFF_YEAR <= leto < VAL_CUTOFF_YEAR
                             # test:   leto >= VAL_CUTOFF_YEAR
 
-# Demo mode: keep only this many randomly-sampled odseki (seed=42)
 DEMO_N_ODSEKI = 500
 
 # ---------------------------------------------------------------------------
@@ -54,6 +56,9 @@ DEMO_N_ODSEKI = 500
 sys.path.insert(0, str(Path(__file__).parent / "data_processing"))
 
 import synthetic_processing
+import agg_posek_meritve
+import agg_posek_sosedi
+import agg_sestoji_odseke
 
 
 # ---------------------------------------------------------------------------
@@ -91,34 +96,108 @@ def step_preprocess():
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – Join features with targets
+# Step 2 – Aggregate relationships  (same modules as pipeline.py)
 # ---------------------------------------------------------------------------
 
-def step_join(features_df: pl.DataFrame, target_df: pl.DataFrame) -> pl.DataFrame:
+def step_aggregate():
     """
-    Left-join target horizons onto the feature table on (ggo, odsek, leto_mesec).
-    Numeric nulls are filled with 0.
-    """
-    log.info("=== Step 2: Joining features with targets ===")
+    Build relationship tables and return them as polars DataFrames.
 
-    df = features_df.join(target_df, on=["ggo", "odsek", "leto_mesec"], how="left")
+    Sub-steps:
+      a) agg_posek_meritve  – posek × weather  (key: [ggo, odsek_id, leto_mesec])
+      b) agg_posek_sosedi   – posek × neighbour posek  (key: [ggo, odsek_id, leto_mesec])
+      c) agg_sestoji_odseke – odseki × sestoji  (key: [ggo, odsek_id])
+    """
+    log.info("=== Step 2: Aggregating relationships ===")
+
+    log.info("  [agg_posek_meritve] joining posek with rolling weather features...")
+    agg_meritve_df = agg_posek_meritve.aggregate()
+    log.info(
+        f"  [agg_posek_meritve] {agg_meritve_df.shape[0]:,} rows × "
+        f"{agg_meritve_df.shape[1]} cols"
+    )
+
+    log.info("  [agg_posek_sosedi] joining posek with neighbour posek features...")
+    agg_sosedi_df = agg_posek_sosedi.aggregate()
+    log.info(
+        f"  [agg_posek_sosedi] {agg_sosedi_df.shape[0]:,} rows × "
+        f"{agg_sosedi_df.shape[1]} cols"
+    )
+
+    log.info("  [agg_sestoji_odseke] joining odseki with aggregated sestoji...")
+    agg_sestoji_df = agg_sestoji_odseke.aggregate()
+    log.info(
+        f"  [agg_sestoji_odseke] {agg_sestoji_df.shape[0]:,} rows × "
+        f"{agg_sestoji_df.shape[1]} cols"
+    )
+
+    return agg_meritve_df, agg_sosedi_df, agg_sestoji_df
+
+
+# ---------------------------------------------------------------------------
+# Step 3 – Join all tables
+# ---------------------------------------------------------------------------
+
+def step_join(
+    features_df: pl.DataFrame,
+    target_df: pl.DataFrame,
+    agg_meritve_df: pl.DataFrame,
+    agg_sosedi_df: pl.DataFrame,
+    agg_sestoji_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Left-join weather, neighbour, odsek/segment, and target onto the
+    synthetic feature table.  Mirrors pipeline.py's step_join.
+
+    Join order:
+      features × agg_posek_meritve  on (ggo, odsek, leto_mesec)
+               × agg_posek_sosedi   on (ggo, odsek, leto_mesec)
+               × agg_odseki_sestoji on (ggo, odsek)        [static features]
+               × target             on (ggo, odsek, leto_mesec)
+    """
+    log.info("=== Step 3: Joining datasets ===")
+
+    base = features_df
+    ggo_dtype = base.schema["ggo"]
+
+    def _align_ggo(df: pl.DataFrame) -> pl.DataFrame:
+        if df.schema["ggo"] != ggo_dtype:
+            return df.with_columns(pl.col("ggo").cast(ggo_dtype))
+        return df
+
+    meritve_clean = _align_ggo(agg_meritve_df.rename({"odsek_id": "odsek"}))
+    if "used_station" in meritve_clean.columns:
+        meritve_clean = meritve_clean.drop("used_station")
+    base = base.join(meritve_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
+    log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    sosedi_clean = _align_ggo(agg_sosedi_df.rename({"odsek_id": "odsek"}))
+    base = base.join(sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
+    log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    sestoji_clean = _align_ggo(agg_sestoji_df.rename({"odsek_id": "odsek"}))
+    base = base.join(sestoji_clean, on=["ggo", "odsek"], how="left", suffix="_odsek")
+    log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    base = base.join(target_df, on=["ggo", "odsek", "leto_mesec"], how="left")
+    log.info(f"  after target join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     numeric_cols = [
-        c for c, t in zip(df.columns, df.dtypes)
+        c for c, t in zip(base.columns, base.dtypes)
         if t in (pl.Float32, pl.Float64, pl.Int32, pl.Int64,
                  pl.UInt32, pl.UInt64, pl.Int8, pl.Int16,
                  pl.UInt8, pl.UInt16)
     ]
-    df = df.with_columns([
+    base = base.with_columns([
         pl.col(c).fill_nan(None).fill_null(0) for c in numeric_cols
     ])
 
-    log.info(f"  joined dataset: {df.shape[0]:,} rows × {df.shape[1]} cols")
-    return df
+    log.info(f"  final dataset: {base.shape[0]:,} rows × {base.shape[1]} cols")
+    return base
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Split and export
+# Step 4 – Split and export
 # ---------------------------------------------------------------------------
 
 def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
@@ -135,7 +214,7 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
       data/synthetic/splits/val_synthetic.csv
       data/synthetic/splits/test_synthetic.csv
     """
-    log.info("=== Step 3: Splitting and exporting ===")
+    log.info("=== Step 4: Splitting and exporting ===")
 
     if "leto" not in df.columns:
         log.info("  'leto' column missing – deriving from 'leto_mesec'")
@@ -180,7 +259,7 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="BarkWatch synthetic data pipeline – preprocess and split."
+        description="BarkWatch synthetic data pipeline – preprocess, aggregate, split."
     )
     parser.add_argument(
         "--demo",
@@ -195,7 +274,8 @@ def main() -> None:
     log.info("Starting BarkWatch synthetic pipeline%s", " [DEMO MODE]" if args.demo else "")
 
     features_df, target_df = step_preprocess()
-    final_df = step_join(features_df, target_df)
+    agg_meritve_df, agg_sosedi_df, agg_sestoji_df = step_aggregate()
+    final_df = step_join(features_df, target_df, agg_meritve_df, agg_sosedi_df, agg_sestoji_df)
     step_split_export(final_df, demo=args.demo)
 
     log.info("Synthetic pipeline complete.")
