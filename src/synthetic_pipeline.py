@@ -39,6 +39,7 @@ log = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 ROOT          = Path(__file__).resolve().parents[1]
+PROCESSED_DIR = ROOT / "data" / "processed"
 SYNTHETIC_DIR = ROOT / "data" / "synthetic"
 
 # ---------------------------------------------------------------------------
@@ -104,9 +105,12 @@ def step_aggregate():
     Build relationship tables and return them as polars DataFrames.
 
     Sub-steps:
-      a) agg_posek_meritve  – posek × weather  (key: [ggo, odsek_id, leto_mesec])
-      b) agg_posek_sosedi   – posek × neighbour posek  (key: [ggo, odsek_id, leto_mesec])
-      c) agg_sestoji_odseke – odseki × sestoji  (key: [ggo, odsek_id])
+      a) agg_posek_meritve       – posek × weather  (key: [ggo, odsek_id, leto_mesec])
+      b) agg_posek_sosedi        – real posek × neighbour real posek
+                                   (col prefix "sosedi_")
+      c) agg_posek_sosedi (synth)– synthetic data × neighbour synthetic data
+                                   (col prefix "synth_sosedi_")
+      d) agg_sestoji_odseke      – odseki × sestoji  (key: [ggo, odsek_id])
     """
     log.info("=== Step 2: Aggregating relationships ===")
 
@@ -117,11 +121,22 @@ def step_aggregate():
         f"{agg_meritve_df.shape[1]} cols"
     )
 
-    log.info("  [agg_posek_sosedi] joining posek with neighbour posek features...")
+    log.info("  [agg_posek_sosedi] joining real posek with neighbour real posek features...")
     agg_sosedi_df = agg_posek_sosedi.aggregate()
     log.info(
         f"  [agg_posek_sosedi] {agg_sosedi_df.shape[0]:,} rows × "
         f"{agg_sosedi_df.shape[1]} cols"
+    )
+
+    log.info("  [agg_posek_sosedi] joining synthetic data with neighbour synthetic features...")
+    agg_synth_sosedi_df = agg_posek_sosedi.aggregate(
+        posek_path=SYNTHETIC_DIR / "synthetic_posek_processed.csv",
+        out_path=SYNTHETIC_DIR / "agg_synth_sosedi.csv",
+        col_prefix="synth_sosedi_",
+    )
+    log.info(
+        f"  [agg_posek_sosedi/synth] {agg_synth_sosedi_df.shape[0]:,} rows × "
+        f"{agg_synth_sosedi_df.shape[1]} cols"
     )
 
     log.info("  [agg_sestoji_odseke] joining odseki with aggregated sestoji...")
@@ -131,7 +146,7 @@ def step_aggregate():
         f"{agg_sestoji_df.shape[1]} cols"
     )
 
-    return agg_meritve_df, agg_sosedi_df, agg_sestoji_df
+    return agg_meritve_df, agg_sosedi_df, agg_synth_sosedi_df, agg_sestoji_df
 
 
 # ---------------------------------------------------------------------------
@@ -143,17 +158,19 @@ def step_join(
     target_df: pl.DataFrame,
     agg_meritve_df: pl.DataFrame,
     agg_sosedi_df: pl.DataFrame,
+    agg_synth_sosedi_df: pl.DataFrame,
     agg_sestoji_df: pl.DataFrame,
 ) -> pl.DataFrame:
     """
-    Left-join weather, neighbour, odsek/segment, and target onto the
-    synthetic feature table.  Mirrors pipeline.py's step_join.
+    Left-join weather, neighbour (real + synthetic), odsek/segment, and target
+    onto the synthetic feature table.  Mirrors pipeline.py's step_join.
 
     Join order:
-      features × agg_posek_meritve  on (ggo, odsek, leto_mesec)
-               × agg_posek_sosedi   on (ggo, odsek, leto_mesec)
-               × agg_odseki_sestoji on (ggo, odsek)        [static features]
-               × target             on (ggo, odsek, leto_mesec)
+      features × agg_posek_meritve       on (ggo, odsek, leto_mesec)
+               × agg_posek_sosedi        on (ggo, odsek, leto_mesec)  [real posek neighbours, "sosedi_*"]
+               × agg_posek_sosedi/synth  on (ggo, odsek, leto_mesec)  [synthetic neighbours, "synth_sosedi_*"]
+               × agg_odseki_sestoji      on (ggo, odsek)              [static segment features]
+               × target                  on (ggo, odsek, leto_mesec)
     """
     log.info("=== Step 3: Joining datasets ===")
 
@@ -169,18 +186,22 @@ def step_join(
     if "used_station" in meritve_clean.columns:
         meritve_clean = meritve_clean.drop("used_station")
     base = base.join(meritve_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
-    log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
+    log.info(f"  after weather join:            {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     sosedi_clean = _align_ggo(agg_sosedi_df.rename({"odsek_id": "odsek"}))
     base = base.join(sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
-    log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
+    log.info(f"  after real neighbour join:     {base.shape[0]:,} rows × {base.shape[1]} cols")
+
+    synth_sosedi_clean = _align_ggo(agg_synth_sosedi_df.rename({"odsek_id": "odsek"}))
+    base = base.join(synth_sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
+    log.info(f"  after synthetic neighbour join:{base.shape[0]:,} rows × {base.shape[1]} cols")
 
     sestoji_clean = _align_ggo(agg_sestoji_df.rename({"odsek_id": "odsek"}))
     base = base.join(sestoji_clean, on=["ggo", "odsek"], how="left", suffix="_odsek")
-    log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
+    log.info(f"  after odseki join:             {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     base = base.join(target_df, on=["ggo", "odsek", "leto_mesec"], how="left")
-    log.info(f"  after target join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
+    log.info(f"  after target join:             {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     numeric_cols = [
         c for c, t in zip(base.columns, base.dtypes)
@@ -274,8 +295,11 @@ def main() -> None:
     log.info("Starting BarkWatch synthetic pipeline%s", " [DEMO MODE]" if args.demo else "")
 
     features_df, target_df = step_preprocess()
-    agg_meritve_df, agg_sosedi_df, agg_sestoji_df = step_aggregate()
-    final_df = step_join(features_df, target_df, agg_meritve_df, agg_sosedi_df, agg_sestoji_df)
+    agg_meritve_df, agg_sosedi_df, agg_synth_sosedi_df, agg_sestoji_df = step_aggregate()
+    final_df = step_join(
+        features_df, target_df,
+        agg_meritve_df, agg_sosedi_df, agg_synth_sosedi_df, agg_sestoji_df,
+    )
     step_split_export(final_df, demo=args.demo)
 
     log.info("Synthetic pipeline complete.")

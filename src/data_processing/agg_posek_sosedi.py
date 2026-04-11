@@ -102,24 +102,28 @@ def build_edge_list(postaje_path: Path) -> pd.DataFrame:
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def main(
+    posek_path: Path = POSEK_IN,
+    out_path: Path = OUT_PATH,
+    col_prefix: str = "sosedi_",
+):
     # 1. Build edge list
     print(f"Gradim seznam sosedov: {POSTAJE_IN}")
     edges = build_edge_list(POSTAJE_IN)
     print(f"  Skupaj robov (odsek → sosed): {len(edges):,}")
     print(f"  Unikatnih [ggo, odsek_id] v izhodišču: {edges[['ggo', 'odsek_id']].drop_duplicates().shape[0]:,}")
 
-    # 2. Load posek_processed (only needed columns)
-    print(f"\nBerem posek: {POSEK_IN}")
+    # 2. Load posek data (only needed columns)
+    print(f"\nBerem posek: {posek_path}")
     posek_cols_present = []
-    header = pd.read_csv(POSEK_IN, nrows=0).columns.tolist()
+    header = pd.read_csv(posek_path, nrows=0).columns.tolist()
     for col in POSEK_COLS:
         if col in header:
             posek_cols_present.append(col)
         else:
             print(f"  OPOZORILO: stolpec '{col}' ni v posek_processed, preskakujem.")
 
-    posek = pd.read_csv(POSEK_IN, usecols=posek_cols_present, low_memory=False)
+    posek = pd.read_csv(posek_path, usecols=posek_cols_present, low_memory=False)
     posek["ggo"] = posek["ggo"].astype(str)
     posek["odsek"] = posek["odsek"].astype(str)
 
@@ -142,9 +146,9 @@ def main():
         if col not in numeric_cols:
             continue
         for fn in funcs:
-            feat_cols.append(f"sosedi_{col}_{fn}")
+            feat_cols.append(f"{col_prefix}{col}_{fn}")
         agg_funcs[col] = funcs
-    feat_cols.append("sosedi_st_sosedov")  # number of neighbors with data
+    feat_cols.append(f"{col_prefix}st_sosedov")  # number of neighbors with data
 
     # 5. Process month by month
     print(f"\nAgregiram {len(all_months)} mesecev × {edges[['ggo', 'odsek_id']].drop_duplicates().shape[0]:,} [ggo, odsek_id]...")
@@ -174,22 +178,22 @@ def main():
             s = grp[col]
             for fn in funcs:
                 if fn == "sum":
-                    agg_parts.append(s.sum(min_count=1).rename(f"sosedi_{col}_sum"))
+                    agg_parts.append(s.sum(min_count=1).rename(f"{col_prefix}{col}_sum"))
                 elif fn == "mean":
-                    agg_parts.append(s.mean().rename(f"sosedi_{col}_mean"))
+                    agg_parts.append(s.mean().rename(f"{col_prefix}{col}_mean"))
                 elif fn == "std":
-                    agg_parts.append(s.std().rename(f"sosedi_{col}_std"))
+                    agg_parts.append(s.std().rename(f"{col_prefix}{col}_std"))
                 elif fn == "median":
-                    agg_parts.append(s.median().rename(f"sosedi_{col}_median"))
+                    agg_parts.append(s.median().rename(f"{col_prefix}{col}_median"))
 
         # Count neighbors that have any data (use target if available, else any lag col)
         count_col = "target" if "target" in joined.columns else next(
             (c for c in AGG_SPEC if c in joined.columns), None
         )
         if count_col is not None:
-            count_s = grp[count_col].count().rename("sosedi_st_sosedov")
+            count_s = grp[count_col].count().rename(f"{col_prefix}st_sosedov")
         else:
-            count_s = grp.size().rename("sosedi_st_sosedov")
+            count_s = grp.size().rename(f"{col_prefix}st_sosedov")
         agg_parts.append(count_s)
 
         month_df = pd.concat(agg_parts, axis=1).reset_index()
@@ -201,33 +205,44 @@ def main():
     result = pd.concat(all_results, ignore_index=True)
     result = result.sort_values(["ggo", "odsek_id", "leto_mesec"]).reset_index(drop=True)
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    result.to_csv(OUT_PATH, index=False, float_format="%.4f")
-    print(f"\nShranjeno: {OUT_PATH}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out_path, index=False, float_format="%.4f")
+    print(f"\nShranjeno: {out_path}")
     print(f"  Vrstice: {len(result):,}  |  Stolpci: {len(result.columns)}")
     print("\nPrimer (prve 3 vrstice z vrednostmi):")
-    sample = result[result["sosedi_st_sosedov"] > 0].head(3)
+    sample = result[result[f"{col_prefix}st_sosedov"] > 0].head(3)
     print(sample.to_string())
     print("\nStolpci:")
     print(list(result.columns))
 
 
-def aggregate() -> "pl.DataFrame":
+def aggregate(
+    posek_path: Path = POSEK_IN,
+    out_path: Path = OUT_PATH,
+    col_prefix: str = "sosedi_",
+) -> "pl.DataFrame":
     """
     Run the full posek-neighbor aggregation and return result as polars DataFrame.
 
-    Reads from:
-      - data/processed/najblizji_odseki_postaje.csv
-      - data/processed/posek_processed.csv
+    Parameters
+    ----------
+    posek_path : Path
+        Source of per-parcel monthly features to aggregate over neighbours.
+        Defaults to posek_processed.csv (real harvest data).
+    out_path : Path
+        Where to write the output CSV.
+    col_prefix : str
+        Prefix for all output feature columns (default "sosedi_").
+        Use e.g. "synth_sosedi_" to distinguish synthetic-sourced features.
 
     Returns:
-        polars DataFrame with columns: odsek_id, leto_mesec,
-        and aggregated neighbor posek features (sosedi_* prefix).
+        polars DataFrame with columns: ggo, odsek_id, leto_mesec,
+        and aggregated neighbour features ({col_prefix}* columns).
     """
     import polars as pl
 
-    main()
-    return pl.read_csv(OUT_PATH)
+    main(posek_path=posek_path, out_path=out_path, col_prefix=col_prefix)
+    return pl.read_csv(out_path)
 
 
 if __name__ == "__main__":

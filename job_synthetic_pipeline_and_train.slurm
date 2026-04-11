@@ -82,8 +82,9 @@ fi
 #           data/synthetic/synthetic_posek_processed.csv
 #           data/synthetic/synthetic_target.csv
 #           data/processed/agg_posek_meritve.csv
-#           data/processed/agg_posek_sosedi.csv
+#           data/processed/agg_posek_sosedi.csv       (real posek neighbours)
 #           data/processed/agg_odseki_sestoji.csv
+#           data/synthetic/agg_synth_sosedi.csv        (synthetic neighbours)
 #           data/synthetic/splits/{train,val,test}_synthetic.csv
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running synthetic_pipeline.py ..."
