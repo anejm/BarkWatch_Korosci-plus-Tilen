@@ -19,7 +19,7 @@ cd "$WORKDIR"
 
 set -euo pipefail
 
-mkdir -p logs data/synthetic/splits data/predictions models
+mkdir -p logs data/synthetic/splits data/predictions models data/processed
 
 # Limit threads to allocated CPUs — prevents LightGBM / OpenMP from grabbing
 # all cores on a shared node.
@@ -45,9 +45,13 @@ fi
 
 # ---------------------------------------------------------------------------
 # Verify that upstream processed files exist (from the main pipeline run)
+# synthetic_pipeline.py now calls the full agg modules (weather, neighbours,
+# odsek/segment), so sestoji_processed.csv is required in addition to the
+# files needed by the raw population generator.
 # ---------------------------------------------------------------------------
 for f in \
     data/processed/odseki_processed.csv \
+    data/processed/sestoji_processed.csv \
     data/processed/najblizji_odseki_postaje.csv \
     data/processed/vreme_mesecno.csv \
     data/processed/posek_processed.csv; do
@@ -77,6 +81,9 @@ fi
 #         Produces:
 #           data/synthetic/synthetic_posek_processed.csv
 #           data/synthetic/synthetic_target.csv
+#           data/processed/agg_posek_meritve.csv
+#           data/processed/agg_posek_sosedi.csv
+#           data/processed/agg_odseki_sestoji.csv
 #           data/synthetic/splits/{train,val,test}_synthetic.csv
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running synthetic_pipeline.py ..."
@@ -84,19 +91,19 @@ python src/synthetic_pipeline.py
 echo "[$(date '+%H:%M:%S')] Synthetic pipeline complete."
 
 # ---------------------------------------------------------------------------
-# Step 3: Train model on synthetic data
+# Step 3: Train model on synthetic data (regressor only — no classifier)
 #         Produces: models/lgb_models_synthetic.pkl
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running train.py --synthetic ..."
-python src/training/train.py --synthetic
+echo "[$(date '+%H:%M:%S')] Running train_synthetic.py ..."
+python src/training/train_synthetic.py
 echo "[$(date '+%H:%M:%S')] Training complete."
 
 # ---------------------------------------------------------------------------
 # Step 4: Run inference on synthetic test set
 #         Produces: data/predictions/predictions_synthetic.csv
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running testing.py --synthetic ..."
-python src/training/testing.py --synthetic
+echo "[$(date '+%H:%M:%S')] Running test_synthetic.py ..."
+python src/training/test_synthetic.py
 echo "[$(date '+%H:%M:%S')] Inference complete."
 
 # ---------------------------------------------------------------------------
