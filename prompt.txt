@@ -1,2 +1,5 @@
-We found out that odsek_id is not unique, rather [ggo, odsek_id] is.
-Go through every .py file inside src/data_processing and change it so ggo is set as a key identifiyer together with odsek_id.
+To predict_the_future.py add the following arguments:
+
+--h1 [0.0 - 5.0]: this parameter changes the predicted h1 from model 1, by multiplying it with a value from 0.0 to 5.0. The changed h1 is then passed onto the other models.
+--padavine [malo, normalno, veliko]: this changes the features that are bound with the rain fall. "malo" changes them, that it simulates as if in the last months much less rain fall should be. "normalno" doesn't change anything, and "veliko" increases the amount of rain in the last months.
+--temperatura [nizma, normalno, viskoa]: changes the features that are bound with the temperature. "nizko" changes the features so they simulate as if the temperature was much less in the last year. "normalna" doesn't change anything. "visoka" simulates as if the temperature was much more.

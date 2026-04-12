@@ -77,7 +77,7 @@ EOF
 # Step 3: Train model
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running train.py ..."
-python src/training/train.py
+python src/training/train.py --weather, --sosedi
 
 # ---------------------------------------------------------------------------
 # Step 4: Run inference on test set
