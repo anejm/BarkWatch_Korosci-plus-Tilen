@@ -55,7 +55,7 @@ AGG_SPEC = {
     "rolling_std_12":  ["mean"],
 }
 
-POSEK_COLS = ["ggo", "odsek", "leto_mesec", "target"] + list(AGG_SPEC.keys())
+POSEK_COLS = ["ggo", "odsek", "leto_mesec"] + list(AGG_SPEC.keys())
 
 
 # ---------------------------------------------------------------------------

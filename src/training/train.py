@@ -1,334 +1,326 @@
+"""Train 12 horizon classifiers for bark-beetle prediction.
+
+This script:
+1. Loads train/val feature splits and target matrix.
+2. Merges targets on ['ggo', 'odsek', 'leto_mesec'].
+3. Trains one imbalance-aware binary classifier per horizon (h1..h12).
+4. Tunes a decision threshold on validation data for best F1.
+5. Logs validation metrics (F1, Precision, Recall, ROC-AUC).
+6. Saves all trained artifacts to models/model.pkl.
 """
-train.py
---------
-Sequential two-stage LightGBM model per horizon (h1..h12).
 
-For each horizon h_i:
-  Features   = base features (sanitised + derived)  +  predictions h1..h(i-1)
-  Stage 1    = LGBMClassifier  → is h_i zero or non-zero?
-               Threshold tuned on val set via F_beta maximisation.
-               beta=0.7 for h8-h12 (favours precision, reduces positive-bias
-               that otherwise compounds through the sequential chain).
-  Stage 2    = LGBMRegressor   → magnitude (Huber loss, non-zero rows only)
-  Prediction = (prob >= threshold) * max(reg_output, 0)
-
-Improvements over XGBoost baseline:
-  - LightGBM + Huber loss: robust to large-harvest outliers that caused
-    RMSE >> MAE (21.7 vs 5.3 m³) in the original model.
-  - Derived features: trend/ratio/flag signals added via add_derived_features().
-  - Column sanitisation: spaces in names stripped (LightGBM requirement).
-  - Precision-mode threshold for late horizons: reduces positive bias at h8-h12.
-
-Inputs:
-  data/processed/splits/train.csv
-  data/processed/splits/val.csv
-  data/processed/target.csv   — h1..h12 in log1p space
-
-Output:
-  models/lgb_models.pkl
-    dict: horizon -> {"clf": LGBMClassifier, "reg": LGBMRegressor,
-                      "threshold": float, "feature_cols": [col, ...]}
-
-For synthetic data training, use train_synthetic.py instead.
-"""
+from __future__ import annotations
 
 import argparse
-import sys
-import time
+import logging
+from pathlib import Path
+from typing import Any
+
 import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
-
-from sklearn.metrics import (
-    f1_score, precision_score, recall_score,
-    mean_absolute_error, root_mean_squared_error,
-)
-
-# ---------------------------------------------------------------------------
-# Paths & model import
-# ---------------------------------------------------------------------------
-ROOT        = Path(__file__).resolve().parents[2]
-DATA_DIR    = ROOT / "data" / "processed" / "splits"
-MODELS_DIR  = ROOT / "models"
-TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
-
-SYNTHETIC_DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
-SYNTHETIC_TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
-
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_PATH           = MODELS_DIR / "lgb_models.pkl"
-MODEL_PATH_SYNTHETIC = MODELS_DIR / "lgb_models_synthetic.pkl"
-
-# Allow importing from project root
-sys.path.insert(0, str(ROOT))
-from models.model import TwoStageHorizonModel, add_derived_features, sanitize_columns
-
-# ---------------------------------------------------------------------------
-# Column config
-# ---------------------------------------------------------------------------
-POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
-
-DROP_COLS = [
-    "datum", "leto",
-]
-TARGET_COLS = [f"h{h}" for h in range(1, 13)]
-
-# Horizons where positive bias compounds — use precision-favouring threshold
-PRECISION_MODE_HORIZONS = {f"h{h}" for h in range(8, 13)}
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.utils.class_weight import compute_class_weight
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+RANDOM_SEED = 42
+INDEX_COLS = ["ggo", "odsek", "leto_mesec"]
+TARGET_COLS = [f"h{i}" for i in range(1, 13)]
+LEAKY_COLS = {"datum", "target", "log1p_target"}
+
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train BarkWatch LightGBM horizon models")
-    p.add_argument("--short", action="store_true",
-                   help="Use *_short.csv splits instead of full splits")
-    p.add_argument("--synthetic", action="store_true",
-                   help="Train on synthetic data; saves to lgb_models_synthetic.pkl")
-    return p.parse_args()
+	root = Path(__file__).resolve().parents[2]
+	parser = argparse.ArgumentParser(description="Train multi-horizon imbalance-aware classifiers")
+	parser.add_argument(
+		"--train-path",
+		type=Path,
+		default=root / "data" / "processed" / "splits" / "train.csv",
+		help="Path to training features CSV",
+	)
+	parser.add_argument(
+		"--val-path",
+		type=Path,
+		default=root / "data" / "processed" / "splits" / "val.csv",
+		help="Path to validation features CSV",
+	)
+	parser.add_argument(
+		"--target-path",
+		type=Path,
+		default=root / "data" / "processed" / "target.csv",
+		help="Path to target CSV with h1..h12",
+	)
+	parser.add_argument(
+		"--output-model",
+		type=Path,
+		default=root / "models" / "model.pkl",
+		help="Output model artifact path",
+	)
+	parser.add_argument(
+		"--n-estimators",
+		type=int,
+		default=300,
+		help="Number of trees in each RandomForest classifier",
+	)
+	return parser.parse_args()
 
 
-def _join_keys(df_x: pd.DataFrame, df_target: pd.DataFrame) -> list[str]:
-    target_keys = set(df_target.columns) & set(POSSIBLE_KEYS)
-    x_keys      = set(df_x.columns)     & set(POSSIBLE_KEYS)
-    common      = sorted(target_keys & x_keys)
-    if not common:
-        raise ValueError(
-            f"No common join keys between X {list(df_x.columns[:8])} "
-            f"and target {list(df_target.columns)}"
-        )
-    return common
+def setup_logging() -> None:
+	logging.basicConfig(
+		level=logging.INFO,
+		format="%(asctime)s | %(levelname)s | %(message)s",
+		datefmt="%H:%M:%S",
+	)
 
 
-def load_and_merge(short: bool, synthetic: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if synthetic:
-        train_path  = SYNTHETIC_DATA_DIR / "train_synthetic.csv"
-        val_path    = SYNTHETIC_DATA_DIR / "val_synthetic.csv"
-        target_path = SYNTHETIC_TARGET_PATH
-    else:
-        suffix      = "_short" if short else ""
-        train_path  = DATA_DIR / f"train{suffix}.csv"
-        val_path    = DATA_DIR / f"val{suffix}.csv"
-        target_path = TARGET_PATH
-
-    for p in (train_path, val_path, target_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Required file not found: {p}")
-
-    print(f"Loading X from {train_path.name} / {val_path.name} …")
-    train_x = pd.read_csv(train_path, low_memory=False)
-    val_x   = pd.read_csv(val_path,   low_memory=False)
-
-    print(f"Loading targets from {TARGET_PATH.name} …")
-    targets = pd.read_csv(TARGET_PATH, low_memory=False)
-
-    keys = _join_keys(train_x, targets)
-    print(f"  Join keys: {keys}")
-
-    target_cols_present = [c for c in TARGET_COLS if c in targets.columns]
-    if len(target_cols_present) != 12:
-        raise ValueError(f"target.csv missing horizon cols; found: {target_cols_present}")
-
-    for df in (train_x, val_x):
-        overlap = [c for c in TARGET_COLS if c in df.columns]
-        if overlap:
-            print(f"  WARNING: feature CSV contains horizon cols {overlap} — dropping")
-            train_x = train_x.drop(columns=[c for c in overlap if c in train_x.columns])
-            val_x   = val_x.drop(  columns=[c for c in overlap if c in val_x.columns])
-            break
-
-    train = train_x.merge(targets[keys + TARGET_COLS], on=keys, how="inner")
-    val   = val_x.merge(  targets[keys + TARGET_COLS], on=keys, how="inner")
-    print(f"  After merge — train: {len(train):,}  |  val: {len(val):,}")
-    return train, val
+def load_csv(path: Path, name: str) -> pd.DataFrame:
+	if not path.exists():
+		raise FileNotFoundError(f"Missing {name}: {path}")
+	return pd.read_csv(path, low_memory=False)
 
 
-def prepare_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split merged df into (id_df, X_base, y).
-
-    Processing pipeline:
-      1. Drop leaky/temporal columns.
-      2. Fill NaN with 0 (lag/rolling features NaN at series start).
-      3. Sanitise column names (strip spaces → LightGBM requirement).
-      4. Add derived features (trends, ratios, flags).
-    """
-    id_cols   = [c for c in POSSIBLE_KEYS if c in df.columns]
-    drop_cols = [c for c in DROP_COLS if c in df.columns]
-    feat_cols = [c for c in df.columns if c not in set(id_cols + drop_cols + TARGET_COLS)]
-
-    if drop_cols:
-        print(f"    Dropping leaky columns: {drop_cols}")
-
-    id_df = df[id_cols].reset_index(drop=True)
-    X     = df[feat_cols].reset_index(drop=True)
-    y     = df[TARGET_COLS].reset_index(drop=True)
-
-    nan_cols = X.columns[X.isna().any()].tolist()
-    if nan_cols:
-        print(f"    Filling NaN in {len(nan_cols)} columns with 0")
-        X = X.fillna(0)
-
-    X = sanitize_columns(X)
-    X = add_derived_features(X)
-
-    return id_df, X, y
+def require_columns(df: pd.DataFrame, required: list[str], name: str) -> None:
+	missing = [col for col in required if col not in df.columns]
+	if missing:
+		raise ValueError(f"{name} missing required columns: {missing}")
 
 
-def _two_stage_predict(model: TwoStageHorizonModel, X: pd.DataFrame) -> np.ndarray:
-    return model.predict(X)
+def normalize_index_columns(df: pd.DataFrame, index_cols: list[str]) -> pd.DataFrame:
+	out = df.copy()
+	for col in index_cols:
+		out[col] = out[col].astype(str).str.strip()
+	return out
 
 
-# ---------------------------------------------------------------------------
-# Main training loop
-# ---------------------------------------------------------------------------
-
-def train(short: bool, synthetic: bool = False) -> None:
-    train_df, val_df = load_and_merge(short, synthetic=synthetic)
-
-    print("\nPreparing features …")
-    _, X_tr_base, y_train = prepare_xy(train_df)
-    _, X_v_base,  y_val   = prepare_xy(val_df)
-
-    print(f"  Train : {len(X_tr_base):,} rows × {X_tr_base.shape[1]} features")
-    print(f"  Val   : {len(X_v_base):,} rows")
-
-    models: dict[str, dict] = {}
-
-    X_tr = X_tr_base.copy()
-    X_v  = X_v_base.copy()
-
-    t_total = time.time()
-
-    for i, col in enumerate(TARGET_COLS):
-        t0 = time.time()
-        print(f"\n[{i+1:2d}/12]  {col}  ({X_tr.shape[1]} features)")
-
-        y_tr = y_train[col].values
-        y_v  = y_val[col].values
-
-        y_tr_bin = (y_tr > 0).astype(int)
-        y_v_bin  = (y_v  > 0).astype(int)
-
-        n_neg = int((y_tr_bin == 0).sum())
-        n_pos = int((y_tr_bin == 1).sum())
-        print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  "
-              f"val_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
-
-        # scale_pos_weight: 0.75-power ratio — stronger than sqrt (~5x) but
-        # less aggressive than full ratio (~25x), balancing recall and precision.
-        spw = (n_neg / max(n_pos, 1)) ** 0.75
-
-        # For late horizons, use precision-favouring threshold (beta=0.7)
-        # to suppress the positive bias that compounds through sequential chain.
-        precision_mode = col in PRECISION_MODE_HORIZONS
-
-        model = TwoStageHorizonModel(
-            scale_pos_weight=spw,
-            precision_mode=precision_mode,
-        )
-        model.fit(X_tr, y_tr, X_v, y_v)
-
-        threshold = model.threshold
-        clf_pred_bin = (model.clf.predict_proba(X_v)[:, 1] >= threshold).astype(int)
-        f1  = f1_score(y_v_bin, clf_pred_bin, zero_division=0)
-        pre = precision_score(y_v_bin, clf_pred_bin, zero_division=0)
-        rec = recall_score(y_v_bin, clf_pred_bin, zero_division=0)
-
-        clf_best = getattr(model.clf, "best_iteration_", "n/a")
-        print(f"clf_best={clf_best}  thresh={threshold:.2f}  "
-              f"F1={f1:.3f}  P={pre:.3f}  R={rec:.3f}")
-
-        nz_v = y_v > 0
-        combined_v = model.predict(X_v)
-        mae_nz = (mean_absolute_error(y_v[nz_v], combined_v[nz_v])
-                  if nz_v.sum() > 0 else float("nan"))
-        bias = float(np.mean(combined_v - y_v))
-
-        reg_best = getattr(model.reg, "best_iteration_", "n/a")
-        print(f"  reg  best={reg_best}  non-zero MAE={mae_nz:.4f}  "
-              f"bias={bias:.4f}  {time.time()-t0:.1f}s")
-
-        # Store in dict (backward-compatible with testing.py which directly
-        # accesses clf, reg, threshold, feature_cols)
-        models[col] = {
-            "clf":          model.clf,
-            "reg":          model.reg,
-            "threshold":    model.threshold,
-            "feature_cols": list(model.feature_cols),
-        }
-
-        # ── Augment features for next horizon ────────────────────────────────
-        # Add predictions from this horizon as a feature for the next.
-        # On training set: add Gaussian noise (σ = 15% of pred std) to
-        # simulate the test-time prediction error and reduce over-fitting.
-        # On validation set: use clean predictions.
-        if i < 11:
-            tr_preds = model.predict(X_tr)
-            v_preds  = model.predict(X_v)
-            pred_col = f"pred_{col}"
-            X_tr = X_tr.copy()
-            X_v  = X_v.copy()
-            tr_noise_scale = float(np.std(tr_preds)) * 0.15   # 15% vs 10%
-            rng = np.random.default_rng(seed=42 + i)
-            X_tr[pred_col] = tr_preds + rng.normal(0, tr_noise_scale, size=len(tr_preds))
-            X_v[pred_col]  = v_preds
-
-    print(f"\nTotal training time: {(time.time() - t_total) / 60:.1f} min")
-
-    # ── Final val evaluation ──────────────────────────────────────────────────
-    print("\nReconstructing val predictions for final metrics …")
-    X_v_eval  = X_v_base.copy()
-    val_preds = np.zeros((len(X_v_eval), 12))
-
-    for i, col in enumerate(TARGET_COLS):
-        m = models[col]
-        X_aligned    = X_v_eval[m["feature_cols"]]
-        preds_i      = _lgb_predict(m, X_aligned)
-        val_preds[:, i] = preds_i
-        if i < 11:
-            X_v_eval = X_v_eval.copy()
-            X_v_eval[f"pred_{col}"] = preds_i
-
-    y_val_arr = y_val.values
-    mae  = mean_absolute_error(y_val_arr, val_preds)
-    rmse = root_mean_squared_error(y_val_arr, val_preds)
-    nz   = y_val_arr > 0
-    bias_overall = float(np.mean(val_preds - y_val_arr))
-
-    print(f"\nVal metrics (all 12 horizons, log1p space):")
-    print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}   Bias: {bias_overall:.4f}")
-    if nz.sum():
-        print(f"  Non-zero — MAE: {mean_absolute_error(y_val_arr[nz], val_preds[nz]):.4f}"
-              f"   RMSE: {root_mean_squared_error(y_val_arr[nz], val_preds[nz]):.4f}")
-
-    print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}  {'Bias':>10s}")
-    for i, col in enumerate(TARGET_COLS):
-        yt = y_val_arr[:, i]
-        yp = val_preds[:, i]
-        nz_col   = yt > 0
-        mae_col  = mean_absolute_error(yt, yp)
-        rmse_col = root_mean_squared_error(yt, yp)
-        mae_nz   = mean_absolute_error(yt[nz_col], yp[nz_col]) if nz_col.sum() else float("nan")
-        bias_col = float(np.mean(yp - yt))
-        print(f"  {col:4s}  {mae_col:10.4f}  {mae_nz:10.4f}  {rmse_col:10.4f}  {bias_col:10.4f}")
-
-    # ── Save ─────────────────────────────────────────────────────────────────
-    save_path = MODEL_PATH_SYNTHETIC if synthetic else MODEL_PATH
-    joblib.dump(models, save_path)
-    print(f"\nModels saved → {save_path}")
+def _target_frame(target_df: pd.DataFrame, index_cols: list[str], target_cols: list[str]) -> pd.DataFrame:
+	require_columns(target_df, index_cols + target_cols, "target CSV")
+	target_norm = normalize_index_columns(target_df, index_cols)
+	subset = target_norm[index_cols + target_cols].copy()
+	subset[target_cols] = subset[target_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+	return subset
 
 
-def _lgb_predict(m: dict, X: pd.DataFrame) -> np.ndarray:
-    """Unified predict using stored clf/reg/threshold (testing.py compatible)."""
-    clf_prob = m["clf"].predict_proba(X)[:, 1]
-    clf_bin  = (clf_prob >= m["threshold"]).astype(int)
-    reg_pred = np.maximum(m["reg"].predict(X), 0.0)
-    return clf_bin * reg_pred
+def merge_features_with_target(
+	feature_df: pd.DataFrame,
+	target_df: pd.DataFrame,
+	index_cols: list[str],
+	target_cols: list[str],
+	split_name: str,
+) -> pd.DataFrame:
+	require_columns(feature_df, index_cols, f"{split_name} features")
+	feat_norm = normalize_index_columns(feature_df, index_cols)
+
+	leakage_cols = [col for col in target_cols if col in feat_norm.columns]
+	if leakage_cols:
+		logging.warning(
+			"%s already contains target horizons %s; dropping before merge.",
+			split_name,
+			leakage_cols,
+		)
+		feat_norm = feat_norm.drop(columns=leakage_cols)
+
+	merged = feat_norm.merge(target_df[index_cols + target_cols], on=index_cols, how="inner")
+	if merged.empty:
+		raise ValueError(f"{split_name} merge produced 0 rows. Check index consistency.")
+
+	logging.info(
+		"%s rows: source=%d, merged=%d",
+		split_name,
+		len(feat_norm),
+		len(merged),
+	)
+	return merged
+
+
+def build_feature_matrix(df: pd.DataFrame, index_cols: list[str], target_cols: list[str]) -> pd.DataFrame:
+	drop_cols = set(index_cols) | set(target_cols) | LEAKY_COLS
+	candidate = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
+	numeric = candidate.select_dtypes(include=[np.number]).copy()
+	if numeric.shape[1] == 0:
+		raise ValueError("No numeric feature columns left after preprocessing.")
+	return numeric
+
+
+def to_binary_target(series: pd.Series) -> np.ndarray:
+	values = pd.to_numeric(series, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+	return (values > 0.0).astype(np.int8)
+
+
+def class_weight_dict(y: np.ndarray) -> dict[int, float] | None:
+	unique = np.unique(y)
+	if unique.size < 2:
+		return None
+	classes = np.array([0, 1], dtype=np.int8)
+	weights = compute_class_weight(class_weight="balanced", classes=classes, y=y)
+	return {0: float(weights[0]), 1: float(weights[1])}
+
+
+def build_classifier(n_estimators: int, seed: int, weight_dict: dict[int, float] | None) -> Pipeline:
+	clf = RandomForestClassifier(
+		n_estimators=n_estimators,
+		max_depth=20,
+		min_samples_leaf=2,
+		n_jobs=-1,
+		random_state=seed,
+		class_weight=weight_dict,
+	)
+	return Pipeline(
+		steps=[
+			("imputer", SimpleImputer(strategy="median")),
+			("model", clf),
+		]
+	)
+
+
+def positive_class_probability(model: Pipeline, x: pd.DataFrame) -> np.ndarray:
+	proba = model.predict_proba(x)
+	classes = model.named_steps["model"].classes_
+	if 1 in classes:
+		idx = int(np.where(classes == 1)[0][0])
+		return proba[:, idx]
+	return np.zeros(len(x), dtype=float)
+
+
+def tune_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+	best_t = 0.5
+	best_f1 = -1.0
+	for threshold in np.linspace(0.05, 0.95, 37):
+		y_pred = (y_prob >= threshold).astype(np.int8)
+		score = f1_score(y_true, y_pred, zero_division=0)
+		if score > best_f1:
+			best_f1 = score
+			best_t = float(threshold)
+	return best_t
+
+
+def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
+	metrics: dict[str, float] = {
+		"f1": float(f1_score(y_true, y_pred, zero_division=0)),
+		"precision": float(precision_score(y_true, y_pred, zero_division=0)),
+		"recall": float(recall_score(y_true, y_pred, zero_division=0)),
+		"positive_rate_true": float(np.mean(y_true)),
+		"positive_rate_pred": float(np.mean(y_pred)),
+	}
+	if np.unique(y_true).size < 2:
+		metrics["roc_auc"] = float("nan")
+	else:
+		metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
+	return metrics
+
+
+def train_models(args: argparse.Namespace) -> None:
+	train_raw = load_csv(args.train_path, "train split")
+	val_raw = load_csv(args.val_path, "validation split")
+	target_raw = load_csv(args.target_path, "target matrix")
+
+	target_df = _target_frame(target_raw, INDEX_COLS, TARGET_COLS)
+
+	train_df = merge_features_with_target(
+		train_raw,
+		target_df,
+		INDEX_COLS,
+		TARGET_COLS,
+		split_name="train",
+	)
+	val_df = merge_features_with_target(
+		val_raw,
+		target_df,
+		INDEX_COLS,
+		TARGET_COLS,
+		split_name="val",
+	)
+
+	x_train = build_feature_matrix(train_df, INDEX_COLS, TARGET_COLS)
+	x_val = build_feature_matrix(val_df, INDEX_COLS, TARGET_COLS)
+
+	x_train = x_train.reindex(sorted(x_train.columns), axis=1)
+	x_val = x_val.reindex(columns=x_train.columns)
+
+	model_bundle: dict[str, Any] = {
+		"index_cols": INDEX_COLS,
+		"target_cols": TARGET_COLS,
+		"feature_columns": list(x_train.columns),
+		"leaky_columns": sorted(LEAKY_COLS),
+		"random_seed": RANDOM_SEED,
+		"models": {},
+	}
+
+	metric_rows: list[dict[str, float | str]] = []
+
+	logging.info("Training with %d rows and %d numeric features", len(x_train), x_train.shape[1])
+
+	for i, horizon in enumerate(TARGET_COLS, start=1):
+		y_train = to_binary_target(train_df[horizon])
+		y_val = to_binary_target(val_df[horizon])
+
+		unique_train = np.unique(y_train)
+		if unique_train.size < 2:
+			constant_prediction = int(unique_train[0])
+			y_prob_val = np.full(len(y_val), float(constant_prediction), dtype=float)
+			y_pred_val = np.full(len(y_val), constant_prediction, dtype=np.int8)
+			threshold = 0.5
+			artifact = {
+				"estimator": None,
+				"threshold": threshold,
+				"constant_prediction": constant_prediction,
+			}
+		else:
+			weights = class_weight_dict(y_train)
+			estimator = build_classifier(
+				n_estimators=args.n_estimators,
+				seed=RANDOM_SEED + i,
+				weight_dict=weights,
+			)
+			estimator.fit(x_train, y_train)
+			y_prob_val = positive_class_probability(estimator, x_val)
+			threshold = tune_threshold(y_val, y_prob_val)
+			y_pred_val = (y_prob_val >= threshold).astype(np.int8)
+			artifact = {
+				"estimator": estimator,
+				"threshold": threshold,
+				"constant_prediction": None,
+			}
+
+		model_bundle["models"][horizon] = artifact
+		metrics = evaluate_binary(y_val, y_pred_val, y_prob_val)
+		metric_rows.append({"horizon": horizon, **metrics})
+
+		logging.info(
+			"[%02d/12] %s | F1=%.4f P=%.4f R=%.4f ROC-AUC=%s threshold=%.2f",
+			i,
+			horizon,
+			metrics["f1"],
+			metrics["precision"],
+			metrics["recall"],
+			"nan" if np.isnan(metrics["roc_auc"]) else f"{metrics['roc_auc']:.4f}",
+			threshold,
+		)
+
+	metrics_df = pd.DataFrame(metric_rows)
+	logging.info("Validation metrics by horizon:\n%s", metrics_df.round(4).to_string(index=False))
+
+	macro = metrics_df[["f1", "precision", "recall", "roc_auc"]].mean(numeric_only=True)
+	logging.info(
+		"Validation macro averages | F1=%.4f Precision=%.4f Recall=%.4f ROC-AUC=%.4f",
+		macro["f1"],
+		macro["precision"],
+		macro["recall"],
+		macro["roc_auc"],
+	)
+
+	args.output_model.parent.mkdir(parents=True, exist_ok=True)
+	joblib.dump(model_bundle, args.output_model)
+	logging.info("Saved trained artifact to %s", args.output_model)
+
+
+def main() -> None:
+	setup_logging()
+	args = parse_args()
+	train_models(args)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    train(short=args.short, synthetic=args.synthetic)
+	main()
