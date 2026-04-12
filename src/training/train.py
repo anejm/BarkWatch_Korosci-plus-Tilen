@@ -70,10 +70,7 @@ from models.model import TwoStageHorizonModel, add_derived_features, sanitize_co
 POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
 
 DROP_COLS = [
-    "datum", "leto", "target", "log1p_target",
-    "sosedi_target_sum", "sosedi_target_mean",
-    "sosedi_target_std", "sosedi_target_median",
-    "sosedi_log1p_target_mean",
+    "datum", "leto",
 ]
 TARGET_COLS = [f"h{h}" for h in range(1, 13)]
 
