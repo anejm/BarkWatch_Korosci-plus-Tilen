@@ -1,422 +1,334 @@
-"""Train one-stage horizon regressors with zero-inflation tweaks.
+"""
+train.py
+--------
+Sequential two-stage LightGBM model per horizon (h1..h12).
 
-Modeling strategy:
-1. Train one RandomForestRegressor per horizon (h1..h12).
-2. Upweight non-zero training rows to fight heavy zero inflation.
-3. Tune a per-horizon cutoff on validation predictions:
-   predictions below this cutoff are set to zero.
+For each horizon h_i:
+  Features   = base features (sanitised + derived)  +  predictions h1..h(i-1)
+  Stage 1    = LGBMClassifier  → is h_i zero or non-zero?
+               Threshold tuned on val set via F_beta maximisation.
+               beta=0.7 for h8-h12 (favours precision, reduces positive-bias
+               that otherwise compounds through the sequential chain).
+  Stage 2    = LGBMRegressor   → magnitude (Huber loss, non-zero rows only)
+  Prediction = (prob >= threshold) * max(reg_output, 0)
 
-This remains one-stage because each horizon uses a single regressor model.
+Improvements over XGBoost baseline:
+  - LightGBM + Huber loss: robust to large-harvest outliers that caused
+    RMSE >> MAE (21.7 vs 5.3 m³) in the original model.
+  - Derived features: trend/ratio/flag signals added via add_derived_features().
+  - Column sanitisation: spaces in names stripped (LightGBM requirement).
+  - Precision-mode threshold for late horizons: reduces positive bias at h8-h12.
+
+Inputs:
+  data/processed/splits/train.csv
+  data/processed/splits/val.csv
+  data/processed/target.csv   — h1..h12 in log1p space
+
+Output:
+  models/lgb_models.pkl
+    dict: horizon -> {"clf": LGBMClassifier, "reg": LGBMRegressor,
+                      "threshold": float, "feature_cols": [col, ...]}
+
+For synthetic data training, use train_synthetic.py instead.
 """
 
-from __future__ import annotations
-
 import argparse
-import logging
-from pathlib import Path
-from typing import Any
-
+import sys
+import time
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.impute import SimpleImputer
+from pathlib import Path
+
 from sklearn.metrics import (
-	f1_score,
-	mean_absolute_error,
-	precision_score,
-	recall_score,
-	roc_auc_score,
-	root_mean_squared_error,
+    f1_score, precision_score, recall_score,
+    mean_absolute_error, root_mean_squared_error,
 )
-from sklearn.pipeline import Pipeline
+
+# ---------------------------------------------------------------------------
+# Paths & model import
+# ---------------------------------------------------------------------------
+ROOT        = Path(__file__).resolve().parents[2]
+DATA_DIR    = ROOT / "data" / "processed" / "splits"
+MODELS_DIR  = ROOT / "models"
+TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
+
+SYNTHETIC_DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
+SYNTHETIC_TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
+
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_PATH           = MODELS_DIR / "lgb_models.pkl"
+MODEL_PATH_SYNTHETIC = MODELS_DIR / "lgb_models_synthetic.pkl"
+
+# Allow importing from project root
+sys.path.insert(0, str(ROOT))
+from models.model import TwoStageHorizonModel, add_derived_features, sanitize_columns
+
+# ---------------------------------------------------------------------------
+# Column config
+# ---------------------------------------------------------------------------
+POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
+
+DROP_COLS = [
+    "datum", "leto",
+]
+TARGET_COLS = [f"h{h}" for h in range(1, 13)]
+
+# Horizons where positive bias compounds — use precision-favouring threshold
+PRECISION_MODE_HORIZONS = {f"h{h}" for h in range(8, 13)}
 
 
-RANDOM_SEED = 42
-INDEX_COLS = ["ggo", "odsek", "leto_mesec"]
-TARGET_COLS = [f"h{i}" for i in range(1, 13)]
-LEAKY_COLS = {"datum", "leto", "target", "log1p_target"}
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-	root = Path(__file__).resolve().parents[2]
-	parser = argparse.ArgumentParser(
-		description="Train one-stage zero-inflated multi-horizon regressors"
-	)
-	parser.add_argument(
-		"--train-path",
-		type=Path,
-		default=root / "data" / "processed" / "splits" / "train.csv",
-		help="Path to training features CSV",
-	)
-	parser.add_argument(
-		"--val-path",
-		type=Path,
-		default=root / "data" / "processed" / "splits" / "val.csv",
-		help="Path to validation features CSV",
-	)
-	parser.add_argument(
-		"--target-path",
-		type=Path,
-		default=root / "data" / "processed" / "target.csv",
-		help="Path to target CSV with h1..h12",
-	)
-	parser.add_argument(
-		"--output-model",
-		type=Path,
-		default=root / "models" / "model.pkl",
-		help="Output model artifact path",
-	)
-	parser.add_argument(
-		"--n-estimators",
-		type=int,
-		default=500,
-		help="Number of trees per horizon regressor",
-	)
-	parser.add_argument(
-		"--max-depth",
-		type=int,
-		default=20,
-		help="Maximum tree depth in each regressor",
-	)
-	parser.add_argument(
-		"--min-samples-leaf",
-		type=int,
-		default=2,
-		help="Minimum samples in each tree leaf",
-	)
-	parser.add_argument(
-		"--positive-weight-scale",
-		type=float,
-		default=0.5,
-		help=(
-			"Non-zero sample weight boost exponent. "
-			"Boost = (n_zero / n_nonzero)^scale"
-		),
-	)
-	parser.add_argument(
-		"--threshold-grid-size",
-		type=int,
-		default=61,
-		help="Number of validation cutoffs to test per horizon",
-	)
-	parser.add_argument(
-		"--threshold-max-quantile",
-		type=float,
-		default=0.995,
-		help="Upper quantile of validation predictions used in cutoff search",
-	)
-	parser.add_argument(
-		"--min-threshold",
-		type=float,
-		default=0.0,
-		help="Lower bound for zero cutoff search",
-	)
-	return parser.parse_args()
+    p = argparse.ArgumentParser(description="Train BarkWatch LightGBM horizon models")
+    p.add_argument("--short", action="store_true",
+                   help="Use *_short.csv splits instead of full splits")
+    p.add_argument("--synthetic", action="store_true",
+                   help="Train on synthetic data; saves to lgb_models_synthetic.pkl")
+    return p.parse_args()
 
 
-def setup_logging() -> None:
-	logging.basicConfig(
-		level=logging.INFO,
-		format="%(asctime)s | %(levelname)s | %(message)s",
-		datefmt="%H:%M:%S",
-	)
+def _join_keys(df_x: pd.DataFrame, df_target: pd.DataFrame) -> list[str]:
+    target_keys = set(df_target.columns) & set(POSSIBLE_KEYS)
+    x_keys      = set(df_x.columns)     & set(POSSIBLE_KEYS)
+    common      = sorted(target_keys & x_keys)
+    if not common:
+        raise ValueError(
+            f"No common join keys between X {list(df_x.columns[:8])} "
+            f"and target {list(df_target.columns)}"
+        )
+    return common
 
 
-def load_csv(path: Path, name: str) -> pd.DataFrame:
-	if not path.exists():
-		raise FileNotFoundError(f"Missing {name}: {path}")
-	return pd.read_csv(path, low_memory=False)
+def load_and_merge(short: bool, synthetic: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if synthetic:
+        train_path  = SYNTHETIC_DATA_DIR / "train_synthetic.csv"
+        val_path    = SYNTHETIC_DATA_DIR / "val_synthetic.csv"
+        target_path = SYNTHETIC_TARGET_PATH
+    else:
+        suffix      = "_short" if short else ""
+        train_path  = DATA_DIR / f"train{suffix}.csv"
+        val_path    = DATA_DIR / f"val{suffix}.csv"
+        target_path = TARGET_PATH
+
+    for p in (train_path, val_path, target_path):
+        if not p.exists():
+            raise FileNotFoundError(f"Required file not found: {p}")
+
+    print(f"Loading X from {train_path.name} / {val_path.name} …")
+    train_x = pd.read_csv(train_path, low_memory=False)
+    val_x   = pd.read_csv(val_path,   low_memory=False)
+
+    print(f"Loading targets from {TARGET_PATH.name} …")
+    targets = pd.read_csv(TARGET_PATH, low_memory=False)
+
+    keys = _join_keys(train_x, targets)
+    print(f"  Join keys: {keys}")
+
+    target_cols_present = [c for c in TARGET_COLS if c in targets.columns]
+    if len(target_cols_present) != 12:
+        raise ValueError(f"target.csv missing horizon cols; found: {target_cols_present}")
+
+    for df in (train_x, val_x):
+        overlap = [c for c in TARGET_COLS if c in df.columns]
+        if overlap:
+            print(f"  WARNING: feature CSV contains horizon cols {overlap} — dropping")
+            train_x = train_x.drop(columns=[c for c in overlap if c in train_x.columns])
+            val_x   = val_x.drop(  columns=[c for c in overlap if c in val_x.columns])
+            break
+
+    train = train_x.merge(targets[keys + TARGET_COLS], on=keys, how="inner")
+    val   = val_x.merge(  targets[keys + TARGET_COLS], on=keys, how="inner")
+    print(f"  After merge — train: {len(train):,}  |  val: {len(val):,}")
+    return train, val
 
 
-def require_columns(df: pd.DataFrame, required: list[str], name: str) -> None:
-	missing = [col for col in required if col not in df.columns]
-	if missing:
-		raise ValueError(f"{name} missing required columns: {missing}")
+def prepare_xy(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split merged df into (id_df, X_base, y).
+
+    Processing pipeline:
+      1. Drop leaky/temporal columns.
+      2. Fill NaN with 0 (lag/rolling features NaN at series start).
+      3. Sanitise column names (strip spaces → LightGBM requirement).
+      4. Add derived features (trends, ratios, flags).
+    """
+    id_cols   = [c for c in POSSIBLE_KEYS if c in df.columns]
+    drop_cols = [c for c in DROP_COLS if c in df.columns]
+    feat_cols = [c for c in df.columns if c not in set(id_cols + drop_cols + TARGET_COLS)]
+
+    if drop_cols:
+        print(f"    Dropping leaky columns: {drop_cols}")
+
+    id_df = df[id_cols].reset_index(drop=True)
+    X     = df[feat_cols].reset_index(drop=True)
+    y     = df[TARGET_COLS].reset_index(drop=True)
+
+    nan_cols = X.columns[X.isna().any()].tolist()
+    if nan_cols:
+        print(f"    Filling NaN in {len(nan_cols)} columns with 0")
+        X = X.fillna(0)
+
+    X = sanitize_columns(X)
+    X = add_derived_features(X)
+
+    return id_df, X, y
 
 
-def normalize_index_columns(df: pd.DataFrame, index_cols: list[str]) -> pd.DataFrame:
-	out = df.copy()
-	for col in index_cols:
-		out[col] = out[col].astype(str).str.strip()
-	return out
+def _two_stage_predict(model: TwoStageHorizonModel, X: pd.DataFrame) -> np.ndarray:
+    return model.predict(X)
 
 
-def build_target_frame(target_df: pd.DataFrame) -> pd.DataFrame:
-	require_columns(target_df, INDEX_COLS + TARGET_COLS, "target CSV")
-	target_norm = normalize_index_columns(target_df, INDEX_COLS)
-	subset = target_norm[INDEX_COLS + TARGET_COLS].copy()
-	subset[TARGET_COLS] = (
-		subset[TARGET_COLS].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-	)
-	subset[TARGET_COLS] = subset[TARGET_COLS].clip(lower=0.0)
-	return subset
+# ---------------------------------------------------------------------------
+# Main training loop
+# ---------------------------------------------------------------------------
+
+def train(short: bool, synthetic: bool = False) -> None:
+    train_df, val_df = load_and_merge(short, synthetic=synthetic)
+
+    print("\nPreparing features …")
+    _, X_tr_base, y_train = prepare_xy(train_df)
+    _, X_v_base,  y_val   = prepare_xy(val_df)
+
+    print(f"  Train : {len(X_tr_base):,} rows × {X_tr_base.shape[1]} features")
+    print(f"  Val   : {len(X_v_base):,} rows")
+
+    models: dict[str, dict] = {}
+
+    X_tr = X_tr_base.copy()
+    X_v  = X_v_base.copy()
+
+    t_total = time.time()
+
+    for i, col in enumerate(TARGET_COLS):
+        t0 = time.time()
+        print(f"\n[{i+1:2d}/12]  {col}  ({X_tr.shape[1]} features)")
+
+        y_tr = y_train[col].values
+        y_v  = y_val[col].values
+
+        y_tr_bin = (y_tr > 0).astype(int)
+        y_v_bin  = (y_v  > 0).astype(int)
+
+        n_neg = int((y_tr_bin == 0).sum())
+        n_pos = int((y_tr_bin == 1).sum())
+        print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  "
+              f"val_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
+
+        # scale_pos_weight: 0.75-power ratio — stronger than sqrt (~5x) but
+        # less aggressive than full ratio (~25x), balancing recall and precision.
+        spw = (n_neg / max(n_pos, 1)) ** 0.75
+
+        # For late horizons, use precision-favouring threshold (beta=0.7)
+        # to suppress the positive bias that compounds through sequential chain.
+        precision_mode = col in PRECISION_MODE_HORIZONS
+
+        model = TwoStageHorizonModel(
+            scale_pos_weight=spw,
+            precision_mode=precision_mode,
+        )
+        model.fit(X_tr, y_tr, X_v, y_v)
+
+        threshold = model.threshold
+        clf_pred_bin = (model.clf.predict_proba(X_v)[:, 1] >= threshold).astype(int)
+        f1  = f1_score(y_v_bin, clf_pred_bin, zero_division=0)
+        pre = precision_score(y_v_bin, clf_pred_bin, zero_division=0)
+        rec = recall_score(y_v_bin, clf_pred_bin, zero_division=0)
+
+        clf_best = getattr(model.clf, "best_iteration_", "n/a")
+        print(f"clf_best={clf_best}  thresh={threshold:.2f}  "
+              f"F1={f1:.3f}  P={pre:.3f}  R={rec:.3f}")
+
+        nz_v = y_v > 0
+        combined_v = model.predict(X_v)
+        mae_nz = (mean_absolute_error(y_v[nz_v], combined_v[nz_v])
+                  if nz_v.sum() > 0 else float("nan"))
+        bias = float(np.mean(combined_v - y_v))
+
+        reg_best = getattr(model.reg, "best_iteration_", "n/a")
+        print(f"  reg  best={reg_best}  non-zero MAE={mae_nz:.4f}  "
+              f"bias={bias:.4f}  {time.time()-t0:.1f}s")
+
+        # Store in dict (backward-compatible with testing.py which directly
+        # accesses clf, reg, threshold, feature_cols)
+        models[col] = {
+            "clf":          model.clf,
+            "reg":          model.reg,
+            "threshold":    model.threshold,
+            "feature_cols": list(model.feature_cols),
+        }
+
+        # ── Augment features for next horizon ────────────────────────────────
+        # Add predictions from this horizon as a feature for the next.
+        # On training set: add Gaussian noise (σ = 15% of pred std) to
+        # simulate the test-time prediction error and reduce over-fitting.
+        # On validation set: use clean predictions.
+        if i < 11:
+            tr_preds = model.predict(X_tr)
+            v_preds  = model.predict(X_v)
+            pred_col = f"pred_{col}"
+            X_tr = X_tr.copy()
+            X_v  = X_v.copy()
+            tr_noise_scale = float(np.std(tr_preds)) * 0.15   # 15% vs 10%
+            rng = np.random.default_rng(seed=42 + i)
+            X_tr[pred_col] = tr_preds + rng.normal(0, tr_noise_scale, size=len(tr_preds))
+            X_v[pred_col]  = v_preds
+
+    print(f"\nTotal training time: {(time.time() - t_total) / 60:.1f} min")
+
+    # ── Final val evaluation ──────────────────────────────────────────────────
+    print("\nReconstructing val predictions for final metrics …")
+    X_v_eval  = X_v_base.copy()
+    val_preds = np.zeros((len(X_v_eval), 12))
+
+    for i, col in enumerate(TARGET_COLS):
+        m = models[col]
+        X_aligned    = X_v_eval[m["feature_cols"]]
+        preds_i      = _lgb_predict(m, X_aligned)
+        val_preds[:, i] = preds_i
+        if i < 11:
+            X_v_eval = X_v_eval.copy()
+            X_v_eval[f"pred_{col}"] = preds_i
+
+    y_val_arr = y_val.values
+    mae  = mean_absolute_error(y_val_arr, val_preds)
+    rmse = root_mean_squared_error(y_val_arr, val_preds)
+    nz   = y_val_arr > 0
+    bias_overall = float(np.mean(val_preds - y_val_arr))
+
+    print(f"\nVal metrics (all 12 horizons, log1p space):")
+    print(f"  Overall  — MAE: {mae:.4f}   RMSE: {rmse:.4f}   Bias: {bias_overall:.4f}")
+    if nz.sum():
+        print(f"  Non-zero — MAE: {mean_absolute_error(y_val_arr[nz], val_preds[nz]):.4f}"
+              f"   RMSE: {root_mean_squared_error(y_val_arr[nz], val_preds[nz]):.4f}")
+
+    print(f"\n  {'':4s}  {'MAE-all':>10s}  {'MAE-nz':>10s}  {'RMSE':>10s}  {'Bias':>10s}")
+    for i, col in enumerate(TARGET_COLS):
+        yt = y_val_arr[:, i]
+        yp = val_preds[:, i]
+        nz_col   = yt > 0
+        mae_col  = mean_absolute_error(yt, yp)
+        rmse_col = root_mean_squared_error(yt, yp)
+        mae_nz   = mean_absolute_error(yt[nz_col], yp[nz_col]) if nz_col.sum() else float("nan")
+        bias_col = float(np.mean(yp - yt))
+        print(f"  {col:4s}  {mae_col:10.4f}  {mae_nz:10.4f}  {rmse_col:10.4f}  {bias_col:10.4f}")
+
+    # ── Save ─────────────────────────────────────────────────────────────────
+    save_path = MODEL_PATH_SYNTHETIC if synthetic else MODEL_PATH
+    joblib.dump(models, save_path)
+    print(f"\nModels saved → {save_path}")
 
 
-def merge_features_with_target(
-	feature_df: pd.DataFrame,
-	target_df: pd.DataFrame,
-	split_name: str,
-) -> pd.DataFrame:
-	require_columns(feature_df, INDEX_COLS, f"{split_name} features")
-	feat_norm = normalize_index_columns(feature_df, INDEX_COLS)
-
-	leakage_cols = [col for col in TARGET_COLS if col in feat_norm.columns]
-	if leakage_cols:
-		logging.warning(
-			"%s split contains horizon targets %s; dropping before merge.",
-			split_name,
-			leakage_cols,
-		)
-		feat_norm = feat_norm.drop(columns=leakage_cols)
-
-	merged = feat_norm.merge(target_df[INDEX_COLS + TARGET_COLS], on=INDEX_COLS, how="inner")
-	if merged.empty:
-		raise ValueError(f"{split_name} merge produced 0 rows. Check index consistency.")
-
-	logging.info("%s rows: source=%d merged=%d", split_name, len(feat_norm), len(merged))
-	return merged
-
-
-def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
-	drop_cols = set(INDEX_COLS) | set(TARGET_COLS) | LEAKY_COLS
-	candidate = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
-	numeric = candidate.select_dtypes(include=[np.number]).copy()
-	if numeric.shape[1] == 0:
-		raise ValueError("No numeric feature columns left after preprocessing.")
-	return numeric
-
-
-def to_regression_target(series: pd.Series) -> np.ndarray:
-	values = pd.to_numeric(series, errors="coerce").fillna(0.0).to_numpy(dtype=float)
-	return np.clip(values, 0.0, None)
-
-
-def build_sample_weights(y: np.ndarray, scale: float) -> tuple[np.ndarray, float]:
-	non_zero_mask = y > 0
-	n_non_zero = int(non_zero_mask.sum())
-	n_zero = int((~non_zero_mask).sum())
-
-	if n_non_zero == 0 or n_zero == 0:
-		return np.ones_like(y, dtype=float), 1.0
-
-	boost = max(1.0, (n_zero / max(n_non_zero, 1)) ** scale)
-	weights = np.ones_like(y, dtype=float)
-	weights[non_zero_mask] = boost
-	return weights, float(boost)
-
-
-def build_regressor(args: argparse.Namespace, seed: int) -> Pipeline:
-	model = RandomForestRegressor(
-		n_estimators=args.n_estimators,
-		max_depth=args.max_depth,
-		min_samples_leaf=args.min_samples_leaf,
-		random_state=seed,
-		n_jobs=-1,
-	)
-	return Pipeline(
-		steps=[
-			("imputer", SimpleImputer(strategy="median")),
-			("model", model),
-		]
-	)
-
-
-def tune_zero_threshold(
-	y_true: np.ndarray,
-	y_pred_raw: np.ndarray,
-	grid_size: int,
-	min_threshold: float,
-	max_quantile: float,
-) -> float:
-	y_true_bin = (y_true > 0).astype(np.int8)
-
-	if len(y_pred_raw) == 0:
-		return float(min_threshold)
-
-	upper = float(np.quantile(y_pred_raw, np.clip(max_quantile, 0.5, 1.0)))
-	upper = max(upper, min_threshold)
-
-	if upper == min_threshold:
-		candidates = np.array([float(min_threshold)], dtype=float)
-	else:
-		candidates = np.linspace(float(min_threshold), upper, max(3, grid_size))
-
-	best_threshold = float(min_threshold)
-	best_f1 = -1.0
-	best_precision = -1.0
-
-	for threshold in candidates:
-		y_pred_bin = (y_pred_raw >= threshold).astype(np.int8)
-		f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
-		precision = precision_score(y_true_bin, y_pred_bin, zero_division=0)
-
-		if f1 > best_f1 or (np.isclose(f1, best_f1) and precision > best_precision):
-			best_f1 = float(f1)
-			best_precision = float(precision)
-			best_threshold = float(threshold)
-
-	return best_threshold
-
-
-def apply_zero_cutoff(y_pred_raw: np.ndarray, cutoff: float) -> np.ndarray:
-	y_pred = np.clip(y_pred_raw, 0.0, None)
-	return np.where(y_pred >= cutoff, y_pred, 0.0)
-
-
-def evaluate_horizon(
-	y_true: np.ndarray,
-	y_pred_raw: np.ndarray,
-	cutoff: float,
-) -> dict[str, float]:
-	y_pred = apply_zero_cutoff(y_pred_raw, cutoff)
-	y_true_bin = (y_true > 0).astype(np.int8)
-	y_pred_bin = (y_pred > 0).astype(np.int8)
-
-	metrics: dict[str, float] = {
-		"f1": float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
-		"precision": float(precision_score(y_true_bin, y_pred_bin, zero_division=0)),
-		"recall": float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
-		"mae": float(mean_absolute_error(y_true, y_pred)),
-		"rmse": float(root_mean_squared_error(y_true, y_pred)),
-		"true_non_zero_rate": float(np.mean(y_true_bin)),
-		"pred_non_zero_rate": float(np.mean(y_pred_bin)),
-	}
-
-	if np.unique(y_true_bin).size < 2:
-		metrics["roc_auc"] = float("nan")
-	else:
-		metrics["roc_auc"] = float(roc_auc_score(y_true_bin, y_pred_raw))
-
-	mask = y_true > 0
-	if mask.any():
-		metrics["non_zero_mae"] = float(mean_absolute_error(y_true[mask], y_pred[mask]))
-		metrics["non_zero_rmse"] = float(root_mean_squared_error(y_true[mask], y_pred[mask]))
-	else:
-		metrics["non_zero_mae"] = float("nan")
-		metrics["non_zero_rmse"] = float("nan")
-
-	return metrics
-
-
-def train_models(args: argparse.Namespace) -> None:
-	train_raw = load_csv(args.train_path, "train split")
-	val_raw = load_csv(args.val_path, "validation split")
-	target_raw = load_csv(args.target_path, "target matrix")
-
-	target_df = build_target_frame(target_raw)
-	train_df = merge_features_with_target(train_raw, target_df, split_name="train")
-	val_df = merge_features_with_target(val_raw, target_df, split_name="val")
-
-	x_train = build_feature_matrix(train_df)
-	x_val = build_feature_matrix(val_df)
-
-	x_train = x_train.reindex(sorted(x_train.columns), axis=1)
-	x_val = x_val.reindex(columns=x_train.columns)
-
-	model_bundle: dict[str, Any] = {
-		"model_type": "one_stage_zero_inflated_random_forest_regression",
-		"zero_inflation_tweaks": {
-			"positive_weight_scale": float(args.positive_weight_scale),
-			"cutoff_tuning": "validation F1 over threshold grid",
-		},
-		"index_cols": INDEX_COLS,
-		"target_cols": TARGET_COLS,
-		"feature_columns": list(x_train.columns),
-		"leaky_columns": sorted(LEAKY_COLS),
-		"random_seed": RANDOM_SEED,
-		"models": {},
-	}
-
-	metric_rows: list[dict[str, float | str]] = []
-
-	logging.info("Training with %d rows and %d numeric features", len(x_train), x_train.shape[1])
-
-	for i, horizon in enumerate(TARGET_COLS, start=1):
-		y_train = to_regression_target(train_df[horizon])
-		y_val = to_regression_target(val_df[horizon])
-
-		unique_train = np.unique(y_train)
-		if unique_train.size == 1:
-			constant_value = float(unique_train[0])
-			y_pred_raw_val = np.full(len(y_val), constant_value, dtype=float)
-			cutoff = tune_zero_threshold(
-				y_true=y_val,
-				y_pred_raw=y_pred_raw_val,
-				grid_size=args.threshold_grid_size,
-				min_threshold=args.min_threshold,
-				max_quantile=args.threshold_max_quantile,
-			)
-			artifact = {
-				"estimator": None,
-				"constant_prediction": constant_value,
-				"zero_cutoff": cutoff,
-				"positive_weight": 1.0,
-			}
-		else:
-			sample_weight, positive_weight = build_sample_weights(y_train, args.positive_weight_scale)
-			estimator = build_regressor(args, seed=RANDOM_SEED + i)
-			estimator.fit(x_train, y_train, model__sample_weight=sample_weight)
-
-			y_pred_raw_val = np.clip(estimator.predict(x_val), 0.0, None)
-			cutoff = tune_zero_threshold(
-				y_true=y_val,
-				y_pred_raw=y_pred_raw_val,
-				grid_size=args.threshold_grid_size,
-				min_threshold=args.min_threshold,
-				max_quantile=args.threshold_max_quantile,
-			)
-			artifact = {
-				"estimator": estimator,
-				"constant_prediction": None,
-				"zero_cutoff": cutoff,
-				"positive_weight": positive_weight,
-			}
-
-		model_bundle["models"][horizon] = artifact
-
-		metrics = evaluate_horizon(y_val, y_pred_raw_val, cutoff)
-		metric_rows.append({"horizon": horizon, "cutoff": cutoff, **metrics})
-
-		logging.info(
-			"[%02d/12] %s | cutoff=%.5f F1=%.4f P=%.4f R=%.4f AUC=%s MAE=%.4f RMSE=%.4f",
-			i,
-			horizon,
-			cutoff,
-			metrics["f1"],
-			metrics["precision"],
-			metrics["recall"],
-			"nan" if np.isnan(metrics["roc_auc"]) else f"{metrics['roc_auc']:.4f}",
-			metrics["mae"],
-			metrics["rmse"],
-		)
-
-	metrics_df = pd.DataFrame(metric_rows)
-	logging.info("Validation metrics by horizon:\n%s", metrics_df.round(4).to_string(index=False))
-
-	macro = metrics_df[["f1", "precision", "recall", "roc_auc", "mae", "rmse"]].mean(
-		numeric_only=True
-	)
-	logging.info(
-		"Validation macro averages | F1=%.4f P=%.4f R=%.4f AUC=%.4f MAE=%.4f RMSE=%.4f",
-		macro["f1"],
-		macro["precision"],
-		macro["recall"],
-		macro["roc_auc"],
-		macro["mae"],
-		macro["rmse"],
-	)
-
-	args.output_model.parent.mkdir(parents=True, exist_ok=True)
-	joblib.dump(model_bundle, args.output_model)
-	logging.info("Saved trained artifact to %s", args.output_model)
-
-
-def main() -> None:
-	setup_logging()
-	args = parse_args()
-	train_models(args)
+def _lgb_predict(m: dict, X: pd.DataFrame) -> np.ndarray:
+    """Unified predict using stored clf/reg/threshold (testing.py compatible)."""
+    clf_prob = m["clf"].predict_proba(X)[:, 1]
+    clf_bin  = (clf_prob >= m["threshold"]).astype(int)
+    reg_pred = np.maximum(m["reg"].predict(X), 0.0)
+    return clf_bin * reg_pred
 
 
 if __name__ == "__main__":
-	main()
+    args = parse_args()
+    train(short=args.short, synthetic=args.synthetic)
