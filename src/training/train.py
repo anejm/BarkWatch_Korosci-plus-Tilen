@@ -29,7 +29,7 @@ from sklearn.utils.class_weight import compute_class_weight
 RANDOM_SEED = 42
 INDEX_COLS = ["ggo", "odsek", "leto_mesec"]
 TARGET_COLS = [f"h{i}" for i in range(1, 13)]
-LEAKY_COLS = {"datum", "target", "log1p_target"}
+LEAKY_COLS = {"datum", "leto"}
 
 
 def parse_args() -> argparse.Namespace:
