@@ -92,19 +92,19 @@ python src/synthetic_pipeline.py
 echo "[$(date '+%H:%M:%S')] Synthetic pipeline complete."
 
 # ---------------------------------------------------------------------------
-# Step 3: Train model on synthetic data (regressor only — no classifier)
+# Step 3: Train model on synthetic data (two-stage: classifier + regressor)
 #         Produces: models/lgb_models_synthetic.pkl
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running train_synthetic.py ..."
-python src/training/train_synthetic.py
+echo "[$(date '+%H:%M:%S')] Running train.py --synthetic ..."
+python src/training/train.py --synthetic
 echo "[$(date '+%H:%M:%S')] Training complete."
 
 # ---------------------------------------------------------------------------
 # Step 4: Run inference on synthetic test set
 #         Produces: data/predictions/predictions_synthetic.csv
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running test_synthetic.py ..."
-python src/training/test_synthetic.py
+echo "[$(date '+%H:%M:%S')] Running testing.py --synthetic ..."
+python src/training/testing.py --synthetic
 echo "[$(date '+%H:%M:%S')] Inference complete."
 
 # ---------------------------------------------------------------------------

@@ -53,8 +53,12 @@ DATA_DIR    = ROOT / "data" / "processed" / "splits"
 MODELS_DIR  = ROOT / "models"
 TARGET_PATH = ROOT / "data" / "processed" / "target.csv"
 
+SYNTHETIC_DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
+SYNTHETIC_TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
+
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_PATH = MODELS_DIR / "lgb_models.pkl"
+MODEL_PATH           = MODELS_DIR / "lgb_models.pkl"
+MODEL_PATH_SYNTHETIC = MODELS_DIR / "lgb_models_synthetic.pkl"
 
 # Allow importing from project root
 sys.path.insert(0, str(ROOT))
@@ -85,6 +89,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train BarkWatch LightGBM horizon models")
     p.add_argument("--short", action="store_true",
                    help="Use *_short.csv splits instead of full splits")
+    p.add_argument("--synthetic", action="store_true",
+                   help="Train on synthetic data; saves to lgb_models_synthetic.pkl")
     return p.parse_args()
 
 
@@ -100,11 +106,16 @@ def _join_keys(df_x: pd.DataFrame, df_target: pd.DataFrame) -> list[str]:
     return common
 
 
-def load_and_merge(short: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
-    suffix     = "_short" if short else ""
-    train_path = DATA_DIR / f"train{suffix}.csv"
-    val_path   = DATA_DIR / f"val{suffix}.csv"
-    target_path = TARGET_PATH
+def load_and_merge(short: bool, synthetic: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if synthetic:
+        train_path  = SYNTHETIC_DATA_DIR / "train_synthetic.csv"
+        val_path    = SYNTHETIC_DATA_DIR / "val_synthetic.csv"
+        target_path = SYNTHETIC_TARGET_PATH
+    else:
+        suffix      = "_short" if short else ""
+        train_path  = DATA_DIR / f"train{suffix}.csv"
+        val_path    = DATA_DIR / f"val{suffix}.csv"
+        target_path = TARGET_PATH
 
     for p in (train_path, val_path, target_path):
         if not p.exists():
@@ -177,8 +188,8 @@ def _two_stage_predict(model: TwoStageHorizonModel, X: pd.DataFrame) -> np.ndarr
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(short: bool) -> None:
-    train_df, val_df = load_and_merge(short)
+def train(short: bool, synthetic: bool = False) -> None:
+    train_df, val_df = load_and_merge(short, synthetic=synthetic)
 
     print("\nPreparing features …")
     _, X_tr_base, y_train = prepare_xy(train_df)
@@ -308,8 +319,9 @@ def train(short: bool) -> None:
         print(f"  {col:4s}  {mae_col:10.4f}  {mae_nz:10.4f}  {rmse_col:10.4f}  {bias_col:10.4f}")
 
     # ── Save ─────────────────────────────────────────────────────────────────
-    joblib.dump(models, MODEL_PATH)
-    print(f"\nModels saved → {MODEL_PATH}")
+    save_path = MODEL_PATH_SYNTHETIC if synthetic else MODEL_PATH
+    joblib.dump(models, save_path)
+    print(f"\nModels saved → {save_path}")
 
 
 def _lgb_predict(m: dict, X: pd.DataFrame) -> np.ndarray:
@@ -322,4 +334,4 @@ def _lgb_predict(m: dict, X: pd.DataFrame) -> np.ndarray:
 
 if __name__ == "__main__":
     args = parse_args()
-    train(short=args.short)
+    train(short=args.short, synthetic=args.synthetic)

@@ -39,6 +39,11 @@ PRED_DIR    = ROOT / "data" / "predictions"
 PRED_DIR.mkdir(parents=True, exist_ok=True)
 PRED_PATH   = PRED_DIR / "predictions.csv"
 
+SYNTHETIC_DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
+SYNTHETIC_TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
+MODEL_PATH_SYNTHETIC  = ROOT / "models" / "lgb_models_synthetic.pkl"
+PRED_PATH_SYNTHETIC   = PRED_DIR / "predictions_synthetic.csv"
+
 # Allow importing feature-engineering helpers from project root
 sys.path.insert(0, str(ROOT))
 from models.model import add_derived_features, sanitize_columns
@@ -68,6 +73,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run BarkWatch test-set inference")
     p.add_argument("--short", action="store_true",
                    help="Use test_short.csv instead of test.csv")
+    p.add_argument("--synthetic", action="store_true",
+                   help="Use synthetic test split and lgb_models_synthetic.pkl")
     return p.parse_args()
 
 
@@ -75,9 +82,12 @@ def _join_keys(df_x: pd.DataFrame, df_ref: pd.DataFrame) -> list[str]:
     return sorted(set(df_x.columns) & set(df_ref.columns) & set(POSSIBLE_KEYS))
 
 
-def load_test(short: bool) -> pd.DataFrame:
-    suffix = "_short" if short else ""
-    path   = DATA_DIR / f"test{suffix}.csv"
+def load_test(short: bool, synthetic: bool = False) -> pd.DataFrame:
+    if synthetic:
+        path = SYNTHETIC_DATA_DIR / "test_synthetic.csv"
+    else:
+        suffix = "_short" if short else ""
+        path   = DATA_DIR / f"test{suffix}.csv"
     if not path.exists():
         raise FileNotFoundError(f"Test file not found: {path}")
     print(f"Loading test set from {path.name} …")
@@ -224,20 +234,24 @@ def evaluate(
 def main() -> None:
     args = parse_args()
 
-    print(f"Loading models from {MODEL_PATH} …")
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
-    models: dict = joblib.load(MODEL_PATH)
+    model_path  = MODEL_PATH_SYNTHETIC  if args.synthetic else MODEL_PATH
+    target_path = SYNTHETIC_TARGET_PATH if args.synthetic else TARGET_PATH
+    pred_path   = PRED_PATH_SYNTHETIC   if args.synthetic else PRED_PATH
+
+    print(f"Loading models from {model_path} …")
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    models: dict = joblib.load(model_path)
     print(f"  Loaded {len(models)} horizon models: {list(models.keys())}")
 
-    test_x        = load_test(short=args.short)
+    test_x        = load_test(short=args.short, synthetic=args.synthetic)
     id_df, X_base = prepare_test(test_x)
     print(f"  Test rows: {len(X_base):,}  |  base features: {X_base.shape[1]}")
 
     print("\nRunning sequential inference …")
     preds = predict(models, X_base)
 
-    evaluate(preds, id_df, test_x, target_path=TARGET_PATH)
+    evaluate(preds, id_df, test_x, target_path=target_path)
 
     # Convert predictions to original space (log1p → expm1) before saving.
     preds_m3 = np.expm1(np.maximum(preds, 0))
@@ -245,8 +259,9 @@ def main() -> None:
         [id_df, pd.DataFrame(preds_m3, columns=PRED_COLS)],
         axis=1,
     )
-    out.to_csv(PRED_PATH, index=False)
-    print(f"\nPredictions saved → {PRED_PATH}  ({len(out):,} rows, values in m³)")
+    out.to_csv(pred_path, index=False)
+    label = " (synthetic)" if args.synthetic else " (values in m³)"
+    print(f"\nPredictions saved → {pred_path}  ({len(out):,} rows{label})")
 
 
 if __name__ == "__main__":
