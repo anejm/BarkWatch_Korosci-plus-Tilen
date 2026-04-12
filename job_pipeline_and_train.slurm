@@ -47,7 +47,7 @@ fi
 #           data/processed/target.csv  (12-horizon targets, log1p)
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running pipeline.py ..."
-python src/pipeline.py
+python src/pipeline.py --weather --sosedi
 
 # ---------------------------------------------------------------------------
 # Step 2: Create shortened CSVs (first 100 rows) for local inspection
@@ -77,7 +77,7 @@ EOF
 # Step 3: Train model
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running train.py ..."
-python src/training/train.py --weather, --sosedi
+python src/training/train.py
 
 # ---------------------------------------------------------------------------
 # Step 4: Run inference on test set
