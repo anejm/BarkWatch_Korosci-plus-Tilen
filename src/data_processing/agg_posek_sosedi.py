@@ -50,10 +50,7 @@ AGG_SPEC = {
     "target":          ["sum", "mean"],
     "lag_1":           ["sum", "mean"],
     "lag_2":           ["sum", "mean"],
-    "lag_6":           ["sum", "mean"],
     "lag_12":          ["sum", "mean"],
-    "rolling_mean_3":  ["mean"],
-    "rolling_mean_6":  ["mean"],
     "rolling_mean_12": ["mean"],
     "rolling_std_12":  ["mean"],
 }
