@@ -88,7 +88,7 @@ fi
 #           data/synthetic/splits/{train,val,test}_synthetic.csv
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running synthetic_pipeline.py ..."
-python src/synthetic_pipeline.py
+python src/synthetic_pipeline.py --weather
 echo "[$(date '+%H:%M:%S')] Synthetic pipeline complete."
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ echo "[$(date '+%H:%M:%S')] Synthetic pipeline complete."
 #         Produces: models/lgb_models_synthetic.pkl
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running train.py --synthetic ..."
-python src/training/train.py --synthetic
+python src/training/train_synthetic.py
 echo "[$(date '+%H:%M:%S')] Training complete."
 
 # ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ echo "[$(date '+%H:%M:%S')] Training complete."
 #         Produces: data/predictions/predictions_synthetic.csv
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running testing.py --synthetic ..."
-python src/training/testing.py --synthetic
+python src/training/test_synthetic.py
 echo "[$(date '+%H:%M:%S')] Inference complete."
 
 # ---------------------------------------------------------------------------
