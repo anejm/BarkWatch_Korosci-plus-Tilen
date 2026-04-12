@@ -1,12 +1,12 @@
-"""Train 12 horizon classifiers for bark-beetle prediction.
+"""Train one-stage horizon regressors with zero-inflation tweaks.
 
-This script:
-1. Loads train/val feature splits and target matrix.
-2. Merges targets on ['ggo', 'odsek', 'leto_mesec'].
-3. Trains one imbalance-aware binary classifier per horizon (h1..h12).
-4. Tunes a decision threshold on validation data for best F1.
-5. Logs validation metrics (F1, Precision, Recall, ROC-AUC).
-6. Saves all trained artifacts to models/model.pkl.
+Modeling strategy:
+1. Train one RandomForestRegressor per horizon (h1..h12).
+2. Upweight non-zero training rows to fight heavy zero inflation.
+3. Tune a per-horizon cutoff on validation predictions:
+   predictions below this cutoff are set to zero.
+
+This remains one-stage because each horizon uses a single regressor model.
 """
 
 from __future__ import annotations
@@ -19,22 +19,30 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+	f1_score,
+	mean_absolute_error,
+	precision_score,
+	recall_score,
+	roc_auc_score,
+	root_mean_squared_error,
+)
 from sklearn.pipeline import Pipeline
-from sklearn.utils.class_weight import compute_class_weight
 
 
 RANDOM_SEED = 42
 INDEX_COLS = ["ggo", "odsek", "leto_mesec"]
 TARGET_COLS = [f"h{i}" for i in range(1, 13)]
-LEAKY_COLS = {"datum", "leto"}
+LEAKY_COLS = {"datum", "leto", "target", "log1p_target"}
 
 
 def parse_args() -> argparse.Namespace:
 	root = Path(__file__).resolve().parents[2]
-	parser = argparse.ArgumentParser(description="Train multi-horizon imbalance-aware classifiers")
+	parser = argparse.ArgumentParser(
+		description="Train one-stage zero-inflated multi-horizon regressors"
+	)
 	parser.add_argument(
 		"--train-path",
 		type=Path,
@@ -62,8 +70,47 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--n-estimators",
 		type=int,
-		default=300,
-		help="Number of trees in each RandomForest classifier",
+		default=500,
+		help="Number of trees per horizon regressor",
+	)
+	parser.add_argument(
+		"--max-depth",
+		type=int,
+		default=20,
+		help="Maximum tree depth in each regressor",
+	)
+	parser.add_argument(
+		"--min-samples-leaf",
+		type=int,
+		default=2,
+		help="Minimum samples in each tree leaf",
+	)
+	parser.add_argument(
+		"--positive-weight-scale",
+		type=float,
+		default=0.5,
+		help=(
+			"Non-zero sample weight boost exponent. "
+			"Boost = (n_zero / n_nonzero)^scale"
+		),
+	)
+	parser.add_argument(
+		"--threshold-grid-size",
+		type=int,
+		default=61,
+		help="Number of validation cutoffs to test per horizon",
+	)
+	parser.add_argument(
+		"--threshold-max-quantile",
+		type=float,
+		default=0.995,
+		help="Upper quantile of validation predictions used in cutoff search",
+	)
+	parser.add_argument(
+		"--min-threshold",
+		type=float,
+		default=0.0,
+		help="Lower bound for zero cutoff search",
 	)
 	return parser.parse_args()
 
@@ -95,48 +142,44 @@ def normalize_index_columns(df: pd.DataFrame, index_cols: list[str]) -> pd.DataF
 	return out
 
 
-def _target_frame(target_df: pd.DataFrame, index_cols: list[str], target_cols: list[str]) -> pd.DataFrame:
-	require_columns(target_df, index_cols + target_cols, "target CSV")
-	target_norm = normalize_index_columns(target_df, index_cols)
-	subset = target_norm[index_cols + target_cols].copy()
-	subset[target_cols] = subset[target_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+def build_target_frame(target_df: pd.DataFrame) -> pd.DataFrame:
+	require_columns(target_df, INDEX_COLS + TARGET_COLS, "target CSV")
+	target_norm = normalize_index_columns(target_df, INDEX_COLS)
+	subset = target_norm[INDEX_COLS + TARGET_COLS].copy()
+	subset[TARGET_COLS] = (
+		subset[TARGET_COLS].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+	)
+	subset[TARGET_COLS] = subset[TARGET_COLS].clip(lower=0.0)
 	return subset
 
 
 def merge_features_with_target(
 	feature_df: pd.DataFrame,
 	target_df: pd.DataFrame,
-	index_cols: list[str],
-	target_cols: list[str],
 	split_name: str,
 ) -> pd.DataFrame:
-	require_columns(feature_df, index_cols, f"{split_name} features")
-	feat_norm = normalize_index_columns(feature_df, index_cols)
+	require_columns(feature_df, INDEX_COLS, f"{split_name} features")
+	feat_norm = normalize_index_columns(feature_df, INDEX_COLS)
 
-	leakage_cols = [col for col in target_cols if col in feat_norm.columns]
+	leakage_cols = [col for col in TARGET_COLS if col in feat_norm.columns]
 	if leakage_cols:
 		logging.warning(
-			"%s already contains target horizons %s; dropping before merge.",
+			"%s split contains horizon targets %s; dropping before merge.",
 			split_name,
 			leakage_cols,
 		)
 		feat_norm = feat_norm.drop(columns=leakage_cols)
 
-	merged = feat_norm.merge(target_df[index_cols + target_cols], on=index_cols, how="inner")
+	merged = feat_norm.merge(target_df[INDEX_COLS + TARGET_COLS], on=INDEX_COLS, how="inner")
 	if merged.empty:
 		raise ValueError(f"{split_name} merge produced 0 rows. Check index consistency.")
 
-	logging.info(
-		"%s rows: source=%d, merged=%d",
-		split_name,
-		len(feat_norm),
-		len(merged),
-	)
+	logging.info("%s rows: source=%d merged=%d", split_name, len(feat_norm), len(merged))
 	return merged
 
 
-def build_feature_matrix(df: pd.DataFrame, index_cols: list[str], target_cols: list[str]) -> pd.DataFrame:
-	drop_cols = set(index_cols) | set(target_cols) | LEAKY_COLS
+def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+	drop_cols = set(INDEX_COLS) | set(TARGET_COLS) | LEAKY_COLS
 	candidate = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
 	numeric = candidate.select_dtypes(include=[np.number]).copy()
 	if numeric.shape[1] == 0:
@@ -144,70 +187,115 @@ def build_feature_matrix(df: pd.DataFrame, index_cols: list[str], target_cols: l
 	return numeric
 
 
-def to_binary_target(series: pd.Series) -> np.ndarray:
+def to_regression_target(series: pd.Series) -> np.ndarray:
 	values = pd.to_numeric(series, errors="coerce").fillna(0.0).to_numpy(dtype=float)
-	return (values > 0.0).astype(np.int8)
+	return np.clip(values, 0.0, None)
 
 
-def class_weight_dict(y: np.ndarray) -> dict[int, float] | None:
-	unique = np.unique(y)
-	if unique.size < 2:
-		return None
-	classes = np.array([0, 1], dtype=np.int8)
-	weights = compute_class_weight(class_weight="balanced", classes=classes, y=y)
-	return {0: float(weights[0]), 1: float(weights[1])}
+def build_sample_weights(y: np.ndarray, scale: float) -> tuple[np.ndarray, float]:
+	non_zero_mask = y > 0
+	n_non_zero = int(non_zero_mask.sum())
+	n_zero = int((~non_zero_mask).sum())
+
+	if n_non_zero == 0 or n_zero == 0:
+		return np.ones_like(y, dtype=float), 1.0
+
+	boost = max(1.0, (n_zero / max(n_non_zero, 1)) ** scale)
+	weights = np.ones_like(y, dtype=float)
+	weights[non_zero_mask] = boost
+	return weights, float(boost)
 
 
-def build_classifier(n_estimators: int, seed: int, weight_dict: dict[int, float] | None) -> Pipeline:
-	clf = RandomForestClassifier(
-		n_estimators=n_estimators,
-		max_depth=20,
-		min_samples_leaf=2,
-		n_jobs=-1,
+def build_regressor(args: argparse.Namespace, seed: int) -> Pipeline:
+	model = RandomForestRegressor(
+		n_estimators=args.n_estimators,
+		max_depth=args.max_depth,
+		min_samples_leaf=args.min_samples_leaf,
 		random_state=seed,
-		class_weight=weight_dict,
+		n_jobs=-1,
 	)
 	return Pipeline(
 		steps=[
 			("imputer", SimpleImputer(strategy="median")),
-			("model", clf),
+			("model", model),
 		]
 	)
 
 
-def positive_class_probability(model: Pipeline, x: pd.DataFrame) -> np.ndarray:
-	proba = model.predict_proba(x)
-	classes = model.named_steps["model"].classes_
-	if 1 in classes:
-		idx = int(np.where(classes == 1)[0][0])
-		return proba[:, idx]
-	return np.zeros(len(x), dtype=float)
+def tune_zero_threshold(
+	y_true: np.ndarray,
+	y_pred_raw: np.ndarray,
+	grid_size: int,
+	min_threshold: float,
+	max_quantile: float,
+) -> float:
+	y_true_bin = (y_true > 0).astype(np.int8)
 
+	if len(y_pred_raw) == 0:
+		return float(min_threshold)
 
-def tune_threshold(y_true: np.ndarray, y_prob: np.ndarray) -> float:
-	best_t = 0.5
+	upper = float(np.quantile(y_pred_raw, np.clip(max_quantile, 0.5, 1.0)))
+	upper = max(upper, min_threshold)
+
+	if upper == min_threshold:
+		candidates = np.array([float(min_threshold)], dtype=float)
+	else:
+		candidates = np.linspace(float(min_threshold), upper, max(3, grid_size))
+
+	best_threshold = float(min_threshold)
 	best_f1 = -1.0
-	for threshold in np.linspace(0.05, 0.95, 37):
-		y_pred = (y_prob >= threshold).astype(np.int8)
-		score = f1_score(y_true, y_pred, zero_division=0)
-		if score > best_f1:
-			best_f1 = score
-			best_t = float(threshold)
-	return best_t
+	best_precision = -1.0
+
+	for threshold in candidates:
+		y_pred_bin = (y_pred_raw >= threshold).astype(np.int8)
+		f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
+		precision = precision_score(y_true_bin, y_pred_bin, zero_division=0)
+
+		if f1 > best_f1 or (np.isclose(f1, best_f1) and precision > best_precision):
+			best_f1 = float(f1)
+			best_precision = float(precision)
+			best_threshold = float(threshold)
+
+	return best_threshold
 
 
-def evaluate_binary(y_true: np.ndarray, y_pred: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
+def apply_zero_cutoff(y_pred_raw: np.ndarray, cutoff: float) -> np.ndarray:
+	y_pred = np.clip(y_pred_raw, 0.0, None)
+	return np.where(y_pred >= cutoff, y_pred, 0.0)
+
+
+def evaluate_horizon(
+	y_true: np.ndarray,
+	y_pred_raw: np.ndarray,
+	cutoff: float,
+) -> dict[str, float]:
+	y_pred = apply_zero_cutoff(y_pred_raw, cutoff)
+	y_true_bin = (y_true > 0).astype(np.int8)
+	y_pred_bin = (y_pred > 0).astype(np.int8)
+
 	metrics: dict[str, float] = {
-		"f1": float(f1_score(y_true, y_pred, zero_division=0)),
-		"precision": float(precision_score(y_true, y_pred, zero_division=0)),
-		"recall": float(recall_score(y_true, y_pred, zero_division=0)),
-		"positive_rate_true": float(np.mean(y_true)),
-		"positive_rate_pred": float(np.mean(y_pred)),
+		"f1": float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
+		"precision": float(precision_score(y_true_bin, y_pred_bin, zero_division=0)),
+		"recall": float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
+		"mae": float(mean_absolute_error(y_true, y_pred)),
+		"rmse": float(root_mean_squared_error(y_true, y_pred)),
+		"true_non_zero_rate": float(np.mean(y_true_bin)),
+		"pred_non_zero_rate": float(np.mean(y_pred_bin)),
 	}
-	if np.unique(y_true).size < 2:
+
+	if np.unique(y_true_bin).size < 2:
 		metrics["roc_auc"] = float("nan")
 	else:
-		metrics["roc_auc"] = float(roc_auc_score(y_true, y_prob))
+		metrics["roc_auc"] = float(roc_auc_score(y_true_bin, y_pred_raw))
+
+	mask = y_true > 0
+	if mask.any():
+		metrics["non_zero_mae"] = float(mean_absolute_error(y_true[mask], y_pred[mask]))
+		metrics["non_zero_rmse"] = float(root_mean_squared_error(y_true[mask], y_pred[mask]))
+	else:
+		metrics["non_zero_mae"] = float("nan")
+		metrics["non_zero_rmse"] = float("nan")
+
 	return metrics
 
 
@@ -216,30 +304,22 @@ def train_models(args: argparse.Namespace) -> None:
 	val_raw = load_csv(args.val_path, "validation split")
 	target_raw = load_csv(args.target_path, "target matrix")
 
-	target_df = _target_frame(target_raw, INDEX_COLS, TARGET_COLS)
+	target_df = build_target_frame(target_raw)
+	train_df = merge_features_with_target(train_raw, target_df, split_name="train")
+	val_df = merge_features_with_target(val_raw, target_df, split_name="val")
 
-	train_df = merge_features_with_target(
-		train_raw,
-		target_df,
-		INDEX_COLS,
-		TARGET_COLS,
-		split_name="train",
-	)
-	val_df = merge_features_with_target(
-		val_raw,
-		target_df,
-		INDEX_COLS,
-		TARGET_COLS,
-		split_name="val",
-	)
-
-	x_train = build_feature_matrix(train_df, INDEX_COLS, TARGET_COLS)
-	x_val = build_feature_matrix(val_df, INDEX_COLS, TARGET_COLS)
+	x_train = build_feature_matrix(train_df)
+	x_val = build_feature_matrix(val_df)
 
 	x_train = x_train.reindex(sorted(x_train.columns), axis=1)
 	x_val = x_val.reindex(columns=x_train.columns)
 
 	model_bundle: dict[str, Any] = {
+		"model_type": "one_stage_zero_inflated_random_forest_regression",
+		"zero_inflation_tweaks": {
+			"positive_weight_scale": float(args.positive_weight_scale),
+			"cutoff_tuning": "validation F1 over threshold grid",
+		},
 		"index_cols": INDEX_COLS,
 		"target_cols": TARGET_COLS,
 		"feature_columns": list(x_train.columns),
@@ -253,62 +333,78 @@ def train_models(args: argparse.Namespace) -> None:
 	logging.info("Training with %d rows and %d numeric features", len(x_train), x_train.shape[1])
 
 	for i, horizon in enumerate(TARGET_COLS, start=1):
-		y_train = to_binary_target(train_df[horizon])
-		y_val = to_binary_target(val_df[horizon])
+		y_train = to_regression_target(train_df[horizon])
+		y_val = to_regression_target(val_df[horizon])
 
 		unique_train = np.unique(y_train)
-		if unique_train.size < 2:
-			constant_prediction = int(unique_train[0])
-			y_prob_val = np.full(len(y_val), float(constant_prediction), dtype=float)
-			y_pred_val = np.full(len(y_val), constant_prediction, dtype=np.int8)
-			threshold = 0.5
+		if unique_train.size == 1:
+			constant_value = float(unique_train[0])
+			y_pred_raw_val = np.full(len(y_val), constant_value, dtype=float)
+			cutoff = tune_zero_threshold(
+				y_true=y_val,
+				y_pred_raw=y_pred_raw_val,
+				grid_size=args.threshold_grid_size,
+				min_threshold=args.min_threshold,
+				max_quantile=args.threshold_max_quantile,
+			)
 			artifact = {
 				"estimator": None,
-				"threshold": threshold,
-				"constant_prediction": constant_prediction,
+				"constant_prediction": constant_value,
+				"zero_cutoff": cutoff,
+				"positive_weight": 1.0,
 			}
 		else:
-			weights = class_weight_dict(y_train)
-			estimator = build_classifier(
-				n_estimators=args.n_estimators,
-				seed=RANDOM_SEED + i,
-				weight_dict=weights,
+			sample_weight, positive_weight = build_sample_weights(y_train, args.positive_weight_scale)
+			estimator = build_regressor(args, seed=RANDOM_SEED + i)
+			estimator.fit(x_train, y_train, model__sample_weight=sample_weight)
+
+			y_pred_raw_val = np.clip(estimator.predict(x_val), 0.0, None)
+			cutoff = tune_zero_threshold(
+				y_true=y_val,
+				y_pred_raw=y_pred_raw_val,
+				grid_size=args.threshold_grid_size,
+				min_threshold=args.min_threshold,
+				max_quantile=args.threshold_max_quantile,
 			)
-			estimator.fit(x_train, y_train)
-			y_prob_val = positive_class_probability(estimator, x_val)
-			threshold = tune_threshold(y_val, y_prob_val)
-			y_pred_val = (y_prob_val >= threshold).astype(np.int8)
 			artifact = {
 				"estimator": estimator,
-				"threshold": threshold,
 				"constant_prediction": None,
+				"zero_cutoff": cutoff,
+				"positive_weight": positive_weight,
 			}
 
 		model_bundle["models"][horizon] = artifact
-		metrics = evaluate_binary(y_val, y_pred_val, y_prob_val)
-		metric_rows.append({"horizon": horizon, **metrics})
+
+		metrics = evaluate_horizon(y_val, y_pred_raw_val, cutoff)
+		metric_rows.append({"horizon": horizon, "cutoff": cutoff, **metrics})
 
 		logging.info(
-			"[%02d/12] %s | F1=%.4f P=%.4f R=%.4f ROC-AUC=%s threshold=%.2f",
+			"[%02d/12] %s | cutoff=%.5f F1=%.4f P=%.4f R=%.4f AUC=%s MAE=%.4f RMSE=%.4f",
 			i,
 			horizon,
+			cutoff,
 			metrics["f1"],
 			metrics["precision"],
 			metrics["recall"],
 			"nan" if np.isnan(metrics["roc_auc"]) else f"{metrics['roc_auc']:.4f}",
-			threshold,
+			metrics["mae"],
+			metrics["rmse"],
 		)
 
 	metrics_df = pd.DataFrame(metric_rows)
 	logging.info("Validation metrics by horizon:\n%s", metrics_df.round(4).to_string(index=False))
 
-	macro = metrics_df[["f1", "precision", "recall", "roc_auc"]].mean(numeric_only=True)
+	macro = metrics_df[["f1", "precision", "recall", "roc_auc", "mae", "rmse"]].mean(
+		numeric_only=True
+	)
 	logging.info(
-		"Validation macro averages | F1=%.4f Precision=%.4f Recall=%.4f ROC-AUC=%.4f",
+		"Validation macro averages | F1=%.4f P=%.4f R=%.4f AUC=%.4f MAE=%.4f RMSE=%.4f",
 		macro["f1"],
 		macro["precision"],
 		macro["recall"],
 		macro["roc_auc"],
+		macro["mae"],
+		macro["rmse"],
 	)
 
 	args.output_model.parent.mkdir(parents=True, exist_ok=True)

@@ -251,9 +251,10 @@ def main() -> None:
     evaluate(preds, id_df, test_x, target_path=target_path)
 
     # Convert predictions to original space (log1p → expm1) before saving.
-    preds_m3 = np.expm1(np.maximum(preds, 0))
+    if LOG_TARGET:
+        preds = np.expm1(np.maximum(preds, 0))
     out = pd.concat(
-        [id_df, pd.DataFrame(preds_m3, columns=PRED_COLS)],
+        [id_df, pd.DataFrame(preds, columns=PRED_COLS)],
         axis=1,
     )
     out.to_csv(pred_path, index=False)

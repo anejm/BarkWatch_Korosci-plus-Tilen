@@ -1,12 +1,4 @@
-"""Run test-set inference using models/model.pkl.
-
-This script:
-1. Loads the trained model artifact and test split.
-2. Builds the feature matrix with the same training-time rules.
-3. Produces h1..h12 predictions.
-4. Writes predictions/test_predictions.csv while preserving
-   ['ggo', 'odsek', 'leto_mesec'].
-"""
+"""Run one-stage zero-inflated regression inference using models/model.pkl."""
 
 from __future__ import annotations
 
@@ -18,18 +10,25 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import (
+	f1_score,
+	mean_absolute_error,
+	precision_score,
+	recall_score,
+	roc_auc_score,
+	root_mean_squared_error,
+)
 from sklearn.pipeline import Pipeline
 
 
 INDEX_COLS = ["ggo", "odsek", "leto_mesec"]
 TARGET_COLS = [f"h{i}" for i in range(1, 13)]
-LEAKY_COLS = {"datum", "leto"}
+LEAKY_COLS = {"datum", "leto", "target", "log1p_target"}
 
 
 def parse_args() -> argparse.Namespace:
 	root = Path(__file__).resolve().parents[2]
-	parser = argparse.ArgumentParser(description="Run multi-horizon test inference")
+	parser = argparse.ArgumentParser(description="Run one-stage zero-inflated test inference")
 	parser.add_argument(
 		"--test-path",
 		type=Path,
@@ -52,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 		"--target-path",
 		type=Path,
 		default=root / "data" / "processed" / "target.csv",
-		help="Optional path for evaluation-only metrics",
+		help="Optional path for evaluation",
 	)
 	parser.add_argument(
 		"--no-eval",
@@ -92,19 +91,20 @@ def normalize_index_columns(df: pd.DataFrame, index_cols: list[str]) -> pd.DataF
 def build_feature_matrix(df: pd.DataFrame, index_cols: list[str], target_cols: list[str]) -> pd.DataFrame:
 	drop_cols = set(index_cols) | set(target_cols) | LEAKY_COLS
 	candidate = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
-	return candidate.select_dtypes(include=[np.number]).copy()
+	numeric = candidate.select_dtypes(include=[np.number]).copy()
+	if numeric.shape[1] == 0:
+		raise ValueError("No numeric feature columns found in test split.")
+	return numeric
 
 
-def positive_class_probability(model: Pipeline, x: pd.DataFrame) -> np.ndarray:
-	proba = model.predict_proba(x)
-	classes = model.named_steps["model"].classes_
-	if 1 in classes:
-		idx = int(np.where(classes == 1)[0][0])
-		return proba[:, idx]
-	return np.zeros(len(x), dtype=float)
+def apply_zero_cutoff(y_pred_raw: np.ndarray, cutoff: float) -> np.ndarray:
+	y_pred = np.clip(y_pred_raw, 0.0, None)
+	return np.where(y_pred >= cutoff, y_pred, 0.0)
 
 
-def run_inference(args: argparse.Namespace) -> tuple[pd.DataFrame, list[str], list[str]]:
+def run_inference(
+	args: argparse.Namespace,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[str]]:
 	if not args.model_path.exists():
 		raise FileNotFoundError(f"Model artifact not found: {args.model_path}")
 
@@ -124,41 +124,51 @@ def run_inference(args: argparse.Namespace) -> tuple[pd.DataFrame, list[str], li
 	x_test_raw = build_feature_matrix(test_df, index_cols, target_cols)
 	x_test = x_test_raw.reindex(columns=feature_columns)
 
-	if x_test.shape[1] != len(feature_columns):
-		raise ValueError("Could not align test features to training schema.")
+	thresholded_predictions: dict[str, np.ndarray] = {}
+	raw_predictions: dict[str, np.ndarray] = {}
 
-	predictions: dict[str, np.ndarray] = {}
 	for horizon in target_cols:
 		if horizon not in models:
 			raise ValueError(f"Model for horizon {horizon} not found in artifact.")
 
 		model_info = models[horizon]
+		cutoff = float(model_info.get("zero_cutoff", 0.0))
 		constant_prediction = model_info.get("constant_prediction")
+
 		if constant_prediction is not None:
-			pred = np.full(len(x_test), int(constant_prediction), dtype=np.int8)
+			y_raw = np.full(len(x_test), float(constant_prediction), dtype=float)
 		else:
 			estimator: Pipeline = model_info["estimator"]
-			threshold = float(model_info.get("threshold", 0.5))
-			prob = positive_class_probability(estimator, x_test)
-			pred = (prob >= threshold).astype(np.int8)
-		predictions[horizon] = pred
+			y_raw = np.clip(estimator.predict(x_test), 0.0, None)
 
-	pred_df = pd.concat(
+		y_pred = apply_zero_cutoff(y_raw, cutoff)
+		raw_predictions[horizon] = y_raw
+		thresholded_predictions[horizon] = y_pred
+
+	prediction_df = pd.concat(
 		[
 			test_df[index_cols].reset_index(drop=True),
-			pd.DataFrame(predictions),
+			pd.DataFrame(thresholded_predictions),
+		],
+		axis=1,
+	)
+	raw_df = pd.concat(
+		[
+			test_df[index_cols].reset_index(drop=True),
+			pd.DataFrame({f"{k}_raw": v for k, v in raw_predictions.items()}),
 		],
 		axis=1,
 	)
 
 	args.output_path.parent.mkdir(parents=True, exist_ok=True)
-	pred_df.to_csv(args.output_path, index=False)
+	prediction_df.to_csv(args.output_path, index=False)
 	logging.info("Saved predictions to %s", args.output_path)
-	return pred_df, index_cols, target_cols
+	return prediction_df, raw_df, index_cols, target_cols
 
 
 def maybe_evaluate(
 	prediction_df: pd.DataFrame,
+	raw_df: pd.DataFrame,
 	target_path: Path,
 	index_cols: list[str],
 	target_cols: list[str],
@@ -171,42 +181,60 @@ def maybe_evaluate(
 	require_columns(target_df, index_cols + target_cols, "target matrix")
 	target_df = normalize_index_columns(target_df, index_cols)
 
-	merged = prediction_df.merge(
-		target_df[index_cols + target_cols],
-		on=index_cols,
-		how="inner",
-		suffixes=("_pred", "_true"),
+	merged = prediction_df.merge(raw_df, on=index_cols, how="inner").merge(
+		target_df[index_cols + target_cols], on=index_cols, how="inner", suffixes=("_pred", "_true")
 	)
 	if merged.empty:
 		logging.info("Skipping evaluation: no overlapping rows between predictions and target.")
 		return
 
 	metric_rows: list[dict[str, float | str]] = []
+
 	for horizon in target_cols:
-		y_pred = pd.to_numeric(merged[f"{horizon}_pred"], errors="coerce").fillna(0).astype(int).to_numpy()
-		y_true = (
-			pd.to_numeric(merged[f"{horizon}_true"], errors="coerce").fillna(0.0).to_numpy() > 0.0
-		).astype(int)
-		metric_rows.append(
-			{
-				"horizon": horizon,
-				"f1": float(f1_score(y_true, y_pred, zero_division=0)),
-				"precision": float(precision_score(y_true, y_pred, zero_division=0)),
-				"recall": float(recall_score(y_true, y_pred, zero_division=0)),
-			}
-		)
+		y_true = pd.to_numeric(merged[f"{horizon}_true"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+		y_true = np.clip(y_true, 0.0, None)
+
+		y_pred = pd.to_numeric(merged[f"{horizon}_pred"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+		y_raw = pd.to_numeric(merged[f"{horizon}_raw"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+		y_true_bin = (y_true > 0).astype(np.int8)
+		y_pred_bin = (y_pred > 0).astype(np.int8)
+
+		row: dict[str, float | str] = {
+			"horizon": horizon,
+			"f1": float(f1_score(y_true_bin, y_pred_bin, zero_division=0)),
+			"precision": float(precision_score(y_true_bin, y_pred_bin, zero_division=0)),
+			"recall": float(recall_score(y_true_bin, y_pred_bin, zero_division=0)),
+			"mae": float(mean_absolute_error(y_true, y_pred)),
+			"rmse": float(root_mean_squared_error(y_true, y_pred)),
+		}
+
+		if np.unique(y_true_bin).size < 2:
+			row["roc_auc"] = float("nan")
+		else:
+			row["roc_auc"] = float(roc_auc_score(y_true_bin, y_raw))
+
+		nz = y_true > 0
+		if nz.any():
+			row["non_zero_mae"] = float(mean_absolute_error(y_true[nz], y_pred[nz]))
+			row["non_zero_rmse"] = float(root_mean_squared_error(y_true[nz], y_pred[nz]))
+		else:
+			row["non_zero_mae"] = float("nan")
+			row["non_zero_rmse"] = float("nan")
+
+		metric_rows.append(row)
 
 	metrics_df = pd.DataFrame(metric_rows)
-	logging.info("Test classification metrics by horizon:\n%s", metrics_df.round(4).to_string(index=False))
+	logging.info("Test metrics by horizon:\n%s", metrics_df.round(4).to_string(index=False))
 
 
 def main() -> None:
 	setup_logging()
 	args = parse_args()
-	pred_df, index_cols, target_cols = run_inference(args)
+	prediction_df, raw_df, index_cols, target_cols = run_inference(args)
 
 	if not args.no_eval:
-		maybe_evaluate(pred_df, args.target_path, index_cols, target_cols)
+		maybe_evaluate(prediction_df, raw_df, args.target_path, index_cols, target_cols)
 
 
 if __name__ == "__main__":
