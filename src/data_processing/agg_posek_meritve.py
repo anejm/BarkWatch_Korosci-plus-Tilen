@@ -114,7 +114,7 @@ def precompute_rolling_features(vreme_df: pd.DataFrame) -> pd.DataFrame:
         }
 
         for col, func in AGG_COLS.items():
-            s = grp[col]
+            s = grp[col].shift(1)
             if func == "sum":
                 rolled = s.rolling(2, min_periods=1).sum()
             elif func == "mean":

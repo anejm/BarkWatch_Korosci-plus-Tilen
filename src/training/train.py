@@ -219,7 +219,7 @@ def train(short: bool, synthetic: bool = False) -> None:
 
         # scale_pos_weight: full ratio — aggressively upweights the minority
         # positive class so the classifier learns to predict non-zero events.
-        spw = (n_neg / max(n_pos, 1)) ** 1.5
+        spw = (n_neg / max(n_pos, 1)) ** 2.0
 
         # threshold search now uses beta=2.0 (recall-favoring) for all horizons;
         # precision_mode is ignored inside TwoStageHorizonModel.
