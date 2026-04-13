@@ -159,7 +159,7 @@ class TwoStageHorizonModel:
         reg_overrides: Optional[dict] = None,
     ):
         # beta=2.0 strongly favours recall — we'd rather predict non-zero than miss an event
-        self._fbeta = 1.5
+        self._fbeta = 1.0
 
         clf_params = {**_CLF_DEFAULTS, "scale_pos_weight": scale_pos_weight}
         if clf_overrides:
