@@ -225,7 +225,6 @@ def train(short: bool, synthetic: bool = False) -> None:
         # precision_mode is ignored inside TwoStageHorizonModel.
         model = TwoStageHorizonModel(
             scale_pos_weight=spw,
-            precision_mode=False,
         )
         model.fit(X_tr, y_tr, X_v, y_v)
 
