@@ -9,8 +9,8 @@ receives base features plus predictions from h1..h(i-1).
 
 Inputs:
   models/lgb_models_synthetic.pkl
-  data/synthetic/splits/test_synthetic.csv
-  data/synthetic/synthetic_target.csv  — for evaluation (optional)
+  data/synthetic/splits/test_synthetic.csv    produced by synthetic_pipeline.py
+  data/synthetic/bark_beetle_target.csv       produced by bark_beetle_processing
 
 Output:
   data/predictions/predictions_synthetic.csv
@@ -30,7 +30,7 @@ from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 # ---------------------------------------------------------------------------
 ROOT        = Path(__file__).resolve().parents[2]
 DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
-TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
+TARGET_PATH = ROOT / "data" / "synthetic" / "bark_beetle_target.csv"
 MODEL_PATH  = ROOT / "models" / "lgb_models_synthetic.pkl"
 PRED_DIR    = ROOT / "data" / "predictions"
 PRED_DIR.mkdir(parents=True, exist_ok=True)

@@ -13,9 +13,9 @@ For each horizon h_i:
   Prediction = max(reg_output, 0)
 
 Inputs:
-  data/synthetic/splits/train_synthetic.csv
-  data/synthetic/splits/val_synthetic.csv
-  data/synthetic/synthetic_target.csv
+  data/synthetic/splits/train_synthetic.csv   produced by synthetic_pipeline.py
+  data/synthetic/splits/val_synthetic.csv     produced by synthetic_pipeline.py
+  data/synthetic/bark_beetle_target.csv       produced by bark_beetle_processing
 
 Output:
   models/lgb_models_synthetic.pkl
@@ -37,7 +37,7 @@ from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 # ---------------------------------------------------------------------------
 ROOT        = Path(__file__).resolve().parents[2]
 DATA_DIR    = ROOT / "data" / "synthetic" / "splits"
-TARGET_PATH = ROOT / "data" / "synthetic" / "synthetic_target.csv"
+TARGET_PATH = ROOT / "data" / "synthetic" / "bark_beetle_target.csv"
 MODELS_DIR  = ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH  = MODELS_DIR / "lgb_models_synthetic.pkl"
@@ -109,7 +109,7 @@ def load_and_merge() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     target_cols_present = [c for c in TARGET_COLS if c in targets.columns]
     if len(target_cols_present) != 12:
-        raise ValueError(f"synthetic_target.csv missing horizon cols; found: {target_cols_present}")
+        raise ValueError(f"bark_beetle_target.csv missing horizon cols; found: {target_cols_present}")
 
     for df in (train_x, val_x):
         overlap = [c for c in TARGET_COLS if c in df.columns]

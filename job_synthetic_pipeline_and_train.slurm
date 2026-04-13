@@ -44,17 +44,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Verify that upstream processed files exist (from the main pipeline run)
-# synthetic_pipeline.py now calls the full agg modules (weather, neighbours,
-# odsek/segment), so sestoji_processed.csv is required in addition to the
-# files needed by the raw population generator.
+# Verify that upstream processed files exist (produced by job_pipeline_and_train)
 # ---------------------------------------------------------------------------
 for f in \
-    data/processed/odseki_processed.csv \
-    data/processed/sestoji_processed.csv \
     data/processed/najblizji_odseki_postaje.csv \
-    data/processed/vreme_mesecno.csv \
-    data/processed/posek_processed.csv; do
+    data/processed/posek_processed.csv \
+    data/processed/vreme_mesecno.csv; do
     if [ ! -f "$f" ]; then
         echo "ERROR: required upstream file missing: $f"
         echo "Run job_pipeline_and_train.slurm first to produce processed data."
@@ -63,47 +58,56 @@ for f in \
 done
 
 # ---------------------------------------------------------------------------
-# Step 1: Generate synthetic bark beetle population timeseries
-#         Skipped if bark_beetle_population.csv already exists.
+# Step 1: Generate synthetic bark beetle data per odsek
+#         Input:  data/processed/posek_processed.csv
+#                 data/processed/najblizji_odseki_postaje.csv
+#                 data/raw/ARSO/vreme.csv
+#         Output: data/synthetic/bark_beetle_by_odsek.csv
+#         Skipped if the output already exists.
 # ---------------------------------------------------------------------------
-SYNTH_RAW="data/synthetic/bark_beetle_population.csv"
+SYNTH_RAW="data/synthetic/bark_beetle_by_odsek.csv"
 
 if [ -f "$SYNTH_RAW" ]; then
     echo "[$(date '+%H:%M:%S')] $SYNTH_RAW already exists — skipping generation."
 else
-    echo "[$(date '+%H:%M:%S')] Generating synthetic bark beetle data ..."
-    python src/generating_synthetic_data/generate_synthetic_data.py
+    echo "[$(date '+%H:%M:%S')] Generating synthetic bark beetle data (generate_bark_beetle_csv.py) ..."
+    python src/generating_synthetic_data/generate_bark_beetle_csv.py
     echo "[$(date '+%H:%M:%S')] Generation complete."
 fi
 
 # ---------------------------------------------------------------------------
 # Step 2: Run the synthetic data pipeline
+#         Reads:   data/synthetic/bark_beetle_by_odsek.csv
+#                  data/processed/najblizji_odseki_postaje.csv  (for ggo + weather)
 #         Produces:
-#           data/synthetic/synthetic_posek_processed.csv
-#           data/synthetic/synthetic_target.csv
-#           data/processed/agg_posek_meritve.csv
-#           data/processed/agg_posek_sosedi.csv       (real posek neighbours)
-#           data/processed/agg_odseki_sestoji.csv
-#           data/synthetic/agg_synth_sosedi.csv        (synthetic neighbours)
-#           data/synthetic/splits/{train,val,test}_synthetic.csv
+#           data/synthetic/bark_beetle_processed.csv   — feature table
+#           data/synthetic/bark_beetle_target.csv      — 12-horizon targets (log1p)
+#           data/synthetic/splits/train_synthetic.csv
+#           data/synthetic/splits/val_synthetic.csv
+#           data/synthetic/splits/test_synthetic.csv
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running synthetic_pipeline.py ..."
-python src/synthetic_pipeline.py --weather
+python src/synthetic_pipeline.py
 echo "[$(date '+%H:%M:%S')] Synthetic pipeline complete."
 
 # ---------------------------------------------------------------------------
-# Step 3: Train model on synthetic data (two-stage: classifier + regressor)
+# Step 3: Train LightGBM regressor on synthetic data
+#         Reads:   data/synthetic/splits/{train,val}_synthetic.csv
+#                  data/synthetic/bark_beetle_target.csv
 #         Produces: models/lgb_models_synthetic.pkl
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running train.py --synthetic ..."
+echo "[$(date '+%H:%M:%S')] Running train_synthetic.py ..."
 python src/training/train_synthetic.py
 echo "[$(date '+%H:%M:%S')] Training complete."
 
 # ---------------------------------------------------------------------------
-# Step 4: Run inference on synthetic test set
+# Step 4: Run inference on the synthetic test set
+#         Reads:   models/lgb_models_synthetic.pkl
+#                  data/synthetic/splits/test_synthetic.csv
+#                  data/synthetic/bark_beetle_target.csv  (optional, for eval)
 #         Produces: data/predictions/predictions_synthetic.csv
 # ---------------------------------------------------------------------------
-echo "[$(date '+%H:%M:%S')] Running testing.py --synthetic ..."
+echo "[$(date '+%H:%M:%S')] Running test_synthetic.py ..."
 python src/training/test_synthetic.py
 echo "[$(date '+%H:%M:%S')] Inference complete."
 
@@ -116,4 +120,4 @@ echo ""
 echo "Artifacts ready for download:"
 echo "  scp <user>@hpc.arnes.si:$WORKDIR/models/lgb_models_synthetic.pkl ."
 echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/predictions/predictions_synthetic.csv ."
-echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/synthetic/synthetic_target.csv ."
+echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/synthetic/bark_beetle_target.csv ."

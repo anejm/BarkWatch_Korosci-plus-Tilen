@@ -3,7 +3,9 @@ synthetic_pipeline.py
 ---------------------
 Orchestrates the synthetic BarkWatch data pipeline:
 
-  1. Preprocess  – feature-engineer synthetic bark beetle timeseries
+  1. Preprocess  – feature-engineer bark_beetle_by_odsek.csv (joins ggo +
+                   weather station from najblizji_odseki_postaje, adds lag /
+                   rolling / calendar features in the same manner as pipeline.py)
   2. Aggregate   – optionally build enrichment tables (weather, neighbours,
                    odseki+sestoji) — reuses the same agg modules as pipeline.py
   3. Join        – combine selected tables into one feature-rich dataset
@@ -11,8 +13,11 @@ Orchestrates the synthetic BarkWatch data pipeline:
 
 Enrichment flags (all off by default):
   --weather   add rolling 12-month weather features per parcel
-  --sosedi    add neighbour features from both real posek AND synthetic data
+  --sosedi    add neighbour features per parcel
   --odsek     add static forest-segment (sestoji) features per parcel
+
+Input:
+  data/synthetic/bark_beetle_by_odsek.csv   – simulated bark beetle counts per odsek
 
 Usage:
     python synthetic_pipeline.py                              # base features only
@@ -60,7 +65,7 @@ DEMO_N_ODSEKI = 500
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent / "data_processing"))
 
-import synthetic_processing
+import bark_beetle_processing
 import agg_posek_meritve
 import agg_posek_sosedi
 import agg_sestoji_odseke
@@ -72,29 +77,35 @@ import agg_sestoji_odseke
 
 def step_preprocess():
     """
-    Call synthetic_processing, save intermediate CSVs, return DataFrames.
+    Call bark_beetle_processing, save intermediate CSVs, return DataFrames.
+
+    Reads bark_beetle_by_odsek.csv, joins ggo and weather station from
+    najblizji_odseki_postaje.csv, and adds lag / rolling / calendar features
+    in the same manner as posek_processing.py in pipeline.py.
 
     Files written:
-      data/synthetic/synthetic_posek_processed.csv  — feature table
-      data/synthetic/synthetic_target.csv           — 12-horizon target matrix
+      data/synthetic/bark_beetle_processed.csv  — feature table
+                                                   (odsek_id, weather, ggo,
+                                                    bark_beetle_count + features)
+      data/synthetic/bark_beetle_target.csv     — 12-horizon target matrix
     """
-    log.info("=== Step 1: Preprocessing synthetic data ===")
+    log.info("=== Step 1: Preprocessing bark beetle data ===")
     SYNTHETIC_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("  [synthetic] loading and feature-engineering bark beetle data...")
-    features_df = synthetic_processing.preprocess()
-    features_df.write_csv(SYNTHETIC_DIR / "synthetic_posek_processed.csv")
+    log.info("  [bark_beetle] loading and feature-engineering bark_beetle_by_odsek.csv...")
+    features_df = bark_beetle_processing.preprocess()
+    features_df.write_csv(SYNTHETIC_DIR / "bark_beetle_processed.csv")
     log.info(
-        f"  [synthetic] {features_df.shape[0]:,} rows × {features_df.shape[1]} cols "
-        f"→ synthetic_posek_processed.csv"
+        f"  [bark_beetle] {features_df.shape[0]:,} rows × {features_df.shape[1]} cols "
+        f"→ bark_beetle_processed.csv"
     )
 
-    log.info("  [synthetic] building 12-horizon target matrix...")
-    target_df = synthetic_processing.make_target()
-    target_df.write_csv(SYNTHETIC_DIR / "synthetic_target.csv")
+    log.info("  [bark_beetle] building 12-horizon target matrix...")
+    target_df = bark_beetle_processing.make_target()
+    target_df.write_csv(SYNTHETIC_DIR / "bark_beetle_target.csv")
     log.info(
-        f"  [synthetic] {target_df.shape[0]:,} rows × {target_df.shape[1]} cols "
-        f"→ synthetic_target.csv"
+        f"  [bark_beetle] {target_df.shape[0]:,} rows × {target_df.shape[1]} cols "
+        f"→ bark_beetle_target.csv"
     )
 
     return features_df, target_df
@@ -113,18 +124,16 @@ def step_aggregate(
     Build the requested enrichment tables and return them in a dict.
 
     Keys always present (value is None when the flag was not set):
-      "meritve"      – rolling 12-month weather features
-      "sosedi"       – real posek neighbour features   (prefix "sosedi_")
-      "synth_sosedi" – synthetic neighbour features    (prefix "synth_sosedi_")
-      "sestoji"      – static odsek/segment features
+      "meritve"  – rolling 12-month weather features
+      "sosedi"   – neighbour posek features
+      "sestoji"  – static odsek/segment features
     """
     log.info("=== Step 2: Aggregating relationships ===")
 
     result: dict[str, Optional[pl.DataFrame]] = {
-        "meritve":      None,
-        "sosedi":       None,
-        "synth_sosedi": None,
-        "sestoji":      None,
+        "meritve": None,
+        "sosedi":  None,
+        "sestoji": None,
     }
 
     if weather:
@@ -138,22 +147,11 @@ def step_aggregate(
         log.info("  [agg_posek_meritve] skipped (--weather not set)")
 
     if sosedi:
-        log.info("  [agg_posek_sosedi] joining real posek with neighbour real posek features...")
+        log.info("  [agg_posek_sosedi] joining posek with neighbour posek features...")
         result["sosedi"] = agg_posek_sosedi.aggregate()
         log.info(
             f"  [agg_posek_sosedi] {result['sosedi'].shape[0]:,} rows × "
             f"{result['sosedi'].shape[1]} cols"
-        )
-
-        log.info("  [agg_posek_sosedi] joining synthetic data with neighbour synthetic features...")
-        result["synth_sosedi"] = agg_posek_sosedi.aggregate(
-            posek_path=SYNTHETIC_DIR / "synthetic_posek_processed.csv",
-            out_path=SYNTHETIC_DIR / "agg_synth_sosedi.csv",
-            col_prefix="synth_sosedi_",
-        )
-        log.info(
-            f"  [agg_posek_sosedi/synth] {result['synth_sosedi'].shape[0]:,} rows × "
-            f"{result['synth_sosedi'].shape[1]} cols"
         )
     else:
         log.info("  [agg_posek_sosedi] skipped (--sosedi not set)")
@@ -181,15 +179,18 @@ def step_join(
     agg: dict[str, Optional[pl.DataFrame]],
 ) -> pl.DataFrame:
     """
-    Left-join the requested enrichment tables and target onto the synthetic
+    Left-join the requested enrichment tables and target onto the bark beetle
     feature table.  Any agg entry that is None is silently skipped.
 
+    The feature table uses odsek_id as the parcel key (matching
+    bark_beetle_by_odsek.csv).  Agg tables expose odsek_id so no rename is
+    needed before the join.
+
     Join order (when present):
-      features × weather          on (ggo, odsek, leto_mesec)
-               × real neighbours  on (ggo, odsek, leto_mesec)
-               × synth neighbours on (ggo, odsek, leto_mesec)
-               × odsek/segment    on (ggo, odsek)
-               × target           on (ggo, odsek, leto_mesec)
+      features × weather        on (ggo, odsek_id, leto_mesec)
+               × neighbours     on (ggo, odsek_id, leto_mesec)
+               × odsek/segment  on (ggo, odsek_id)
+               × target         on (ggo, odsek_id, leto_mesec)
     """
     log.info("=== Step 3: Joining datasets ===")
 
@@ -202,29 +203,24 @@ def step_join(
         return df
 
     if agg["meritve"] is not None:
-        meritve_clean = _align_ggo(agg["meritve"].rename({"odsek_id": "odsek"}))
+        meritve_clean = _align_ggo(agg["meritve"])
         if "used_station" in meritve_clean.columns:
             meritve_clean = meritve_clean.drop("used_station")
-        base = base.join(meritve_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
-        log.info(f"  after weather join:            {base.shape[0]:,} rows × {base.shape[1]} cols")
+        base = base.join(meritve_clean, on=["ggo", "odsek_id", "leto_mesec"], how="left")
+        log.info(f"  after weather join:   {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     if agg["sosedi"] is not None:
-        sosedi_clean = _align_ggo(agg["sosedi"].rename({"odsek_id": "odsek"}))
-        base = base.join(sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
-        log.info(f"  after real neighbour join:     {base.shape[0]:,} rows × {base.shape[1]} cols")
-
-    if agg["synth_sosedi"] is not None:
-        synth_sosedi_clean = _align_ggo(agg["synth_sosedi"].rename({"odsek_id": "odsek"}))
-        base = base.join(synth_sosedi_clean, on=["ggo", "odsek", "leto_mesec"], how="left")
-        log.info(f"  after synthetic neighbour join:{base.shape[0]:,} rows × {base.shape[1]} cols")
+        sosedi_clean = _align_ggo(agg["sosedi"])
+        base = base.join(sosedi_clean, on=["ggo", "odsek_id", "leto_mesec"], how="left")
+        log.info(f"  after neighbour join: {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     if agg["sestoji"] is not None:
-        sestoji_clean = _align_ggo(agg["sestoji"].rename({"odsek_id": "odsek"}))
-        base = base.join(sestoji_clean, on=["ggo", "odsek"], how="left", suffix="_odsek")
-        log.info(f"  after odseki join:             {base.shape[0]:,} rows × {base.shape[1]} cols")
+        sestoji_clean = _align_ggo(agg["sestoji"])
+        base = base.join(sestoji_clean, on=["ggo", "odsek_id"], how="left", suffix="_odsek")
+        log.info(f"  after odseki join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
 
-    base = base.join(target_df, on=["ggo", "odsek", "leto_mesec"], how="left")
-    log.info(f"  after target join:             {base.shape[0]:,} rows × {base.shape[1]} cols")
+    base = base.join(target_df, on=["ggo", "odsek_id", "leto_mesec"], how="left")
+    log.info(f"  after target join:    {base.shape[0]:,} rows × {base.shape[1]} cols")
 
     numeric_cols = [
         c for c, t in zip(base.columns, base.dtypes)
@@ -273,11 +269,11 @@ def step_split_export(df: pl.DataFrame, demo: bool = False) -> None:
     )
 
     if demo:
-        n_available = df.select(["ggo", "odsek"]).unique().shape[0]
+        n_available = df.select(["ggo", "odsek_id"]).unique().shape[0]
         n_sample    = min(DEMO_N_ODSEKI, n_available)
-        log.info(f"  [demo] subsampling to {n_sample} of {n_available} [ggo, odsek] pairs (seed=42)...")
-        demo_pairs = df.select(["ggo", "odsek"]).unique().sample(n=n_sample, seed=42)
-        df = df.join(demo_pairs, on=["ggo", "odsek"], how="inner")
+        log.info(f"  [demo] subsampling to {n_sample} of {n_available} [ggo, odsek_id] pairs (seed=42)...")
+        demo_pairs = df.select(["ggo", "odsek_id"]).unique().sample(n=n_sample, seed=42)
+        df = df.join(demo_pairs, on=["ggo", "odsek_id"], how="inner")
 
     train = df.filter(pl.col("leto") < TRAIN_CUTOFF_YEAR)
     val   = df.filter(
@@ -329,7 +325,7 @@ def main() -> None:
     ]
     active = [e for e in enrichments if e]
     label = f" [{', '.join(active)}]" if active else " [base only]"
-    log.info("Starting BarkWatch synthetic pipeline%s%s",
+    log.info("Starting BarkWatch bark-beetle synthetic pipeline%s%s",
              " [DEMO MODE]" if args.demo else "", label)
 
     features_df, target_df = step_preprocess()

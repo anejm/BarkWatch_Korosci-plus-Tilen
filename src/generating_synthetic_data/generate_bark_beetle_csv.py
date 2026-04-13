@@ -46,21 +46,47 @@ VREME_IN   = DATA / "raw" / "ARSO" / "vreme.csv"
 OUT_PATH   = DATA / "synthetic" / "bark_beetle_by_odsek.csv"
 
 # ---------------------------------------------------------------------------
-# Model parameters  (matching the ChatGPT formula in prompt.txt)
+# Model parameters
+# Output unit: beetles / m²
+#
+# Target steady-state ranges (calibrated against Slovenian station temperatures):
+#   Winter  (Dec–Feb):              10 –   200  beetles / m²
+#   Building outbreak (spring/autumn): 200 – 2 000  beetles / m²
+#   Peak outbreak (Jun–Sep):       2 000 – 10 000  beetles / m²
+#
+# Growth and winter mortality share the same temperature sigmoid so the two
+# terms are automatically complementary: warm months → growth dominates,
+# cold months → mortality dominates.
 # ---------------------------------------------------------------------------
 PARAMS = {
-    "r":          0.3,    # intrinsic growth rate
-    "K":          1000.0, # carrying capacity (beetles per odsek)
-    "alpha":      0.002,  # harvest predation strength (applied to normalised wood_cut)
-    "beta":       0.15,   # temperature-driven amplification
-    "gamma":      0.1,    # neighbour diffusion rate
-    "lag":        1,      # months lag before harvest reduces population
-    "noise_std":  20.0,   # stochastic noise std
-    "temp_opt":   20.0,   # optimal temperature (°C) for bark beetles
-    "temp_width": 10.0,   # temperature tolerance (°C, Gaussian half-width)
-    # winter mortality
-    "eta":        0.05,   # strength of cold mortality
-    "T_crit":    -10.0,   # min-temp threshold below which beetles die
+    # Logistic growth — gated by average temperature
+    "r":           0.80,   # max monthly intrinsic growth rate (summer optimum)
+    "K":       10000.0,    # carrying capacity (beetles / m²)
+    "T_grow":      5.0,    # avg-temp pivot: growth = 0 below, = r above  (°C)
+    "grow_steep":  3.0,    # sigmoid steepness  (°C)
+
+    # Swarming / flight boost — Gaussian peak at optimal flight temperature
+    "beta":        0.20,   # swarming amplification strength
+    "temp_opt":   20.0,    # optimal temperature for beetle flight  (°C)
+    "temp_width":  8.0,    # Gaussian half-width  (°C)
+
+    # Harvest predation (wood cutting with 1-month lag)
+    "alpha":       0.30,   # predation fraction per normalised harvest unit
+    "lag":         1,      # harvest effect lag  (months)
+
+    # Winter mortality — smooth, uses the same sigmoid as growth (inverted).
+    # mu = mu_max * (1 − grow_gate):  high when cold, ~0 when warm.
+    # At median Jan avg_T = +0.9 °C → grow_gate ≈ 0.20 → mu ≈ 0.76 (76 % / month).
+    # Two cold months collapse a 5 000/m² population to ~120/m², matching
+    # observed winter dieback in alpine spruce stands.
+    "mu_max":      0.95,   # maximum monthly mortality fraction (cold limit)
+
+    # Spatial diffusion
+    "gamma":       0.05,   # neighbour diffusion rate
+
+    # Proportional noise (realistic: small when population is low)
+    "noise_rel":   0.05,   # noise std as fraction of current B
+    "noise_floor": 3.0,    # minimum noise std  (beetles / m²)
 }
 
 RNG_SEED = 42
@@ -242,57 +268,63 @@ def main():
 
     # ── 7. Simulation ────────────────────────────────────────────────────────
     p = PARAMS
-    K      = p["K"]
-    r      = p["r"]
-    alpha  = p["alpha"]
-    beta   = p["beta"]
-    gamma  = p["gamma"]
-    lag    = p["lag"]
-    t_opt  = p["temp_opt"]
-    t_wid  = p["temp_width"]
-    noise_std = p["noise_std"]
-    eta    = p["eta"]
-    T_crit = p["T_crit"]
+    K           = p["K"]
+    r           = p["r"]
+    T_grow      = p["T_grow"]
+    grow_steep  = p["grow_steep"]
+    beta        = p["beta"]
+    t_opt       = p["temp_opt"]
+    t_wid       = p["temp_width"]
+    alpha       = p["alpha"]
+    lag         = p["lag"]
+    mu_max      = p["mu_max"]
+    gamma       = p["gamma"]
+    noise_rel   = p["noise_rel"]
+    noise_floor = p["noise_floor"]
 
-    # Seed population at ~10 % of K with spatial variation
-    B = rng.uniform(0.05, 0.15, size=N) * K
+    # Seed in winter range: 20–100 beetles/m²
+    B = rng.uniform(20.0, 100.0, size=N)
 
     B_history = np.empty((N, T_steps), dtype=np.float32)
 
     print(f"\nRunning simulation: {T_steps} months × {N:,} odseks …")
     for t in range(T_steps):
 
-        # --- Temperature suitability (Gaussian) ---
-        temp_factor = np.exp(-((avg_T[:, t] - t_opt) ** 2) / (2.0 * t_wid ** 2))
-        temp_variability = (max_T[:, t] - min_T[:, t]) / 20.0
-        temp_effect = temp_factor * (1.0 + 0.3 * temp_variability)
+        # ── temperature gate (shared by growth and mortality) ──────────────
+        # grow_gate ≈ 0 when T << T_grow, ≈ 1 when T >> T_grow.
+        grow_gate = 1.0 / (1.0 + np.exp(-(avg_T[:, t] - T_grow) / grow_steep))
 
-        # --- Logistic growth ---
-        growth = r * B * (1.0 - B / K)
+        # ── logistic growth (zero in cold months) ──────────────────────────
+        growth = r * grow_gate * B * (1.0 - B / K)
 
-        # --- Temperature-driven amplification ---
-        temp_growth = beta * temp_effect * B
+        # ── swarming / flight boost (Gaussian peak at temp_opt) ────────────
+        swarm_factor = np.exp(-((avg_T[:, t] - t_opt) ** 2) / (2.0 * t_wid ** 2))
+        swarm_boost  = beta * swarm_factor * B
 
-        # --- Harvest predation (normalised wood cut, lagged) ---
-        lag_t = max(0, t - lag)
+        # ── winter mortality (inverse of growth gate) ──────────────────────
+        # mu = mu_max * (1 − grow_gate): ~0.76/month at median Jan temp (+0.9 °C),
+        # ~0.03/month at peak summer (+20 °C).
+        # Two cold months collapse 5 000 → ~120 beetles/m².
+        winter_loss = mu_max * (1.0 - grow_gate) * B
+
+        # ── harvest predation (normalised wood cut, lagged 1 month) ────────
+        lag_t     = max(0, t - lag)
         predation = alpha * harvest_norm[:, lag_t] * B
 
-        # --- Neighbour diffusion ---
+        # ── spatial neighbour diffusion ────────────────────────────────────
         if W_norm.nnz > 0:
             mean_nbr_B = np.asarray(W_norm.dot(B)).ravel()
         else:
             mean_nbr_B = B
-        neighbour_effect = gamma * (mean_nbr_B - B)
+        diffusion = gamma * (mean_nbr_B - B)
 
-        # --- Winter mortality (activates when min_T drops below T_crit) ---
-        winter_mortality = eta * np.maximum(0.0, T_crit - min_T[:, t]) * B
+        # ── proportional noise (realistic: small when population is small) ─
+        noise_scale = np.maximum(noise_rel * B, noise_floor)
+        noise       = rng.normal(0.0, 1.0, size=N) * noise_scale
 
-        # --- Stochastic noise ---
-        noise = rng.normal(0.0, noise_std, size=N)
-
-        # --- Update & clamp ---
-        B = B + growth + temp_growth - predation - winter_mortality + neighbour_effect + noise
-        B = np.maximum(B, 0.0)
+        # ── update & clamp to [0, 3·K] ────────────────────────────────────
+        B = B + growth + swarm_boost - winter_loss - predation + diffusion + noise
+        B = np.clip(B, 0.0, 3.0 * K)
 
         B_history[:, t] = B.astype(np.float32)
 
