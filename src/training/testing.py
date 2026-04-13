@@ -204,6 +204,8 @@ def evaluate(
         y_true   = np.expm1(np.maximum(y_true, 0))
         preds_ev = np.expm1(np.maximum(preds_ev, 0))
 
+    preds_ev[preds_ev < 5] = 0.0
+
     mae  = mean_absolute_error(y_true, preds_ev)
     rmse = root_mean_squared_error(y_true, preds_ev)
     nz   = y_true > 0
@@ -254,6 +256,7 @@ def main() -> None:
     # Convert predictions to original space (log1p → expm1) before saving.
     if LOG_TARGET:
         preds = np.expm1(np.maximum(preds, 0))
+    preds[preds < 5] = 0.0
     out = pd.concat(
         [id_df, pd.DataFrame(preds, columns=PRED_COLS)],
         axis=1,
