@@ -112,6 +112,38 @@ python src/training/test_synthetic.py
 echo "[$(date '+%H:%M:%S')] Inference complete."
 
 # ---------------------------------------------------------------------------
+# Step 5: Extract the most recent row per odsek_id from the test split
+#         Reads:   data/synthetic/splits/test_synthetic.csv
+#         Produces: data/synthetic/current_state_synthetic.csv
+# ---------------------------------------------------------------------------
+echo "[$(date '+%H:%M:%S')] Running extract_current_day_data_synthetic.py ..."
+python src/extract_current_day_data_synthetic.py
+echo "[$(date '+%H:%M:%S')] Extraction complete."
+
+# ---------------------------------------------------------------------------
+# Step 6: Generate future predictions from the current state snapshot
+#         Reads:   models/lgb_models_synthetic.pkl
+#                  data/synthetic/current_state_synthetic.csv
+#         Produces: data/predictions/future_predictions_synthetic.csv
+# ---------------------------------------------------------------------------
+echo "[$(date '+%H:%M:%S')] Running predict_the_future_synthetic.py ..."
+python src/predict_the_future_synthetic.py
+echo "[$(date '+%H:%M:%S')] Future prediction complete."
+
+# ---------------------------------------------------------------------------
+# Step 7: Build heatmap data tables
+#         Reads:   data/synthetic/bark_beetle_by_odsek.csv
+#                  data/processed/najblizji_odseki_postaje.csv
+#                  data/predictions/future_predictions_synthetic.csv
+#         Produces:
+#           data/synthetic/heatmap_past_data_synthetic.csv
+#           data/synthetic/heatmap_future_predictions_synthetic.csv
+# ---------------------------------------------------------------------------
+echo "[$(date '+%H:%M:%S')] Running generating_heatmap_data_synthetic.py ..."
+python src/utils/generating_heatmap_data_synthetic.py
+echo "[$(date '+%H:%M:%S')] Heatmap data complete."
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 echo ""
@@ -120,4 +152,6 @@ echo ""
 echo "Artifacts ready for download:"
 echo "  scp <user>@hpc.arnes.si:$WORKDIR/models/lgb_models_synthetic.pkl ."
 echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/predictions/predictions_synthetic.csv ."
-echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/synthetic/bark_beetle_target.csv ."
+echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/predictions/future_predictions_synthetic.csv ."
+echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/synthetic/heatmap_past_data_synthetic.csv ."
+echo "  scp <user>@hpc.arnes.si:$WORKDIR/data/synthetic/heatmap_future_predictions_synthetic.csv ."
