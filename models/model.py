@@ -111,7 +111,7 @@ def add_derived_features(X: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 _CLF_DEFAULTS: dict = dict(
-    n_estimators=1000,
+    n_estimators=2000,
     learning_rate=0.03,
     num_leaves=63,
     max_depth=-1,
