@@ -116,21 +116,21 @@ def precompute_rolling_features(vreme_df: pd.DataFrame) -> pd.DataFrame:
         for col, func in AGG_COLS.items():
             s = grp[col]
             if func == "sum":
-                rolled = s.rolling(12, min_periods=1).sum()
+                rolled = s.rolling(2, min_periods=1).sum()
             elif func == "mean":
-                rolled = s.rolling(12, min_periods=1).mean()
+                rolled = s.rolling(2, min_periods=1).mean()
             elif func == "max":
-                rolled = s.rolling(12, min_periods=1).max()
+                rolled = s.rolling(2, min_periods=1).max()
             elif func == "min":
-                rolled = s.rolling(12, min_periods=1).min()
+                rolled = s.rolling(2, min_periods=1).min()
             else:
-                rolled = s.rolling(12, min_periods=1).mean()
+                rolled = s.rolling(2, min_periods=1).mean()
             feat_rows[f"leto_{col}"] = rolled.values
 
         feat_rows["leto_st_mesecev"] = (
             grp[list(AGG_COLS.keys())[0]]
             .notna()
-            .rolling(12, min_periods=1)
+            .rolling(2, min_periods=1)
             .sum()
             .values
         )
