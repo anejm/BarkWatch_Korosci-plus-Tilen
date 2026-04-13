@@ -53,10 +53,7 @@ from models.model import add_derived_features, sanitize_columns
 # ---------------------------------------------------------------------------
 POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
 DROP_COLS     = [
-    "datum", "leto", "target", "log1p_target",
-    "sosedi_target_sum", "sosedi_target_mean",
-    "sosedi_target_std", "sosedi_target_median",
-    "sosedi_log1p_target_mean",
+    "datum", "leto",
 ]
 TARGET_COLS   = [f"h{h}" for h in range(1, 13)]
 PRED_COLS     = [f"h{h}_pred" for h in range(1, 13)]
@@ -120,9 +117,10 @@ def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def _two_stage_predict(clf, reg, X: pd.DataFrame, threshold: float = 0.5) -> np.ndarray:
     clf_prob = clf.predict_proba(X)[:, 1]
-    clf_bin  = (clf_prob >= threshold).astype(int)
     reg_pred = np.maximum(reg.predict(X), 0)
-    return clf_bin * reg_pred
+    # Soft-blend: full weight above threshold, proportional weight below it.
+    weight = np.where(clf_prob >= threshold, 1.0, clf_prob / threshold)
+    return weight * reg_pred
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +252,10 @@ def main() -> None:
     evaluate(preds, id_df, test_x, target_path=target_path)
 
     # Convert predictions to original space (log1p → expm1) before saving.
-    preds_m3 = np.expm1(np.maximum(preds, 0))
+    if LOG_TARGET:
+        preds = np.expm1(np.maximum(preds, 0))
     out = pd.concat(
-        [id_df, pd.DataFrame(preds_m3, columns=PRED_COLS)],
+        [id_df, pd.DataFrame(preds, columns=PRED_COLS)],
         axis=1,
     )
     out.to_csv(pred_path, index=False)

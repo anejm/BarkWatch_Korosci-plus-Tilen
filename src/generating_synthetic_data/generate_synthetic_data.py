@@ -3,13 +3,17 @@ synthetic_pipeline.py
 ---------------------
 Generates synthetic monthly bark beetle population data per (ggo, odsek)
 for 2007-01 to 2025-12 using a temperature-driven logistic growth model
-with harvest reduction, spatial diffusion, and seasonality.
+with Gaussian temperature suitability, seasonal and outbreak cycles,
+multi-lag wood cutting predation, spatial diffusion, and winter mortality.
 
-Model:
-  1. Logistic growth:  B += r(T) * B * (1 - B/K)
-  2. Harvest reduction: B *= (1 - alpha * H')
-  3. Spatial spread:   B += beta * (W_norm @ B - B)
-  4. Noise:            B += N(0, sigma*K)
+Model (per parcel, per month):
+  1. Temperature suitability: Gaussian response on (avg+min+max)/3
+  2. Growth rate:  r_t = r_base * temp_suitability * seasonal * outbreak
+  3. Logistic growth:  B += r_t * B * (1 - B/K)
+  4. Predator effect:  B -= alpha * wood_cut_lagged * B
+  5. Spatial spread:   B += gamma * neighbor_weight * (neighbor_B - B)
+  6. Winter mortality: B *= (1 - winter_mortality_rate) if avg_T < threshold
+  7. Noise:            B += N(0, noise_std)
 
 Inputs:
   data/processed/odseki_processed.csv         – parcel list + area
@@ -42,38 +46,284 @@ VREME_IN   = DATA / "processed" / "vreme_mesecno.csv"
 POSEK_IN   = DATA / "processed" / "posek_processed.csv"
 OUT_PATH   = DATA / "synthetic" / "bark_beetle_population.csv"
 
-# ---------------------------------------------------------------------------
-# Model parameters
-# ---------------------------------------------------------------------------
-R_MAX    = 0.40   # max monthly intrinsic growth rate
-T_OPT    = 22.0   # optimal temperature for growth (°C)
-A_SIG    = 0.30   # sigmoid steepness
-C_SIG    = 0.50   # sigmoid offset so cold months give negative r
-GAMMA    = 0.30   # seasonality amplitude (peaks June–July)
-ALPHA    = 0.70   # harvest impact strength (0–1)
-BETA     = 0.05   # spatial spread rate
-SIGMA    = 0.04   # noise std as fraction of K
-K_BASE   = 500.0  # carrying capacity per hectare (arbitrary units)
 RNG_SEED = 42
 
 
 # ---------------------------------------------------------------------------
-# Growth rate
+# Temperature suitability
 # ---------------------------------------------------------------------------
 
-def growth_rate(T: np.ndarray, month: int) -> np.ndarray:
+def temperature_suitability(
+    avg_temp,
+    min_temp,
+    max_temp,
+    optimal_temp=22,
+    temp_width=10
+):
     """
-    Temperature- and season-adjusted growth rate.
-
-    r(T) = R_MAX * (sigmoid(T) - C_SIG) * (1 + GAMMA * sin(2pi*(month-4)/12))
-
-    Peaks in June (month=6) via the sin shift of -4 from index origin 1.
-    Returns negative values in cold months (T << T_OPT).
+    Gaussian-like temperature response.
     """
-    sigmoid = 1.0 / (1.0 + np.exp(-A_SIG * (T - T_OPT)))
-    r = R_MAX * (sigmoid - C_SIG)
-    season = 1.0 + GAMMA * np.sin(2.0 * np.pi * (month - 4) / 12.0)
-    return r * season
+
+    temp_mean = (
+        avg_temp +
+        min_temp +
+        max_temp
+    ) / 3
+
+    suitability = np.exp(
+        -((temp_mean - optimal_temp) ** 2)
+        / (2 * temp_width ** 2)
+    )
+
+    return suitability
+
+
+# ---------------------------------------------------------------------------
+# Seasonal reproduction cycle
+# ---------------------------------------------------------------------------
+
+def seasonal_factor(t, amplitude=0.3):
+    """
+    Annual sinusoidal cycle.
+    """
+
+    month = t % 12
+
+    return 1 + amplitude * np.sin(
+        2 * np.pi * month / 12
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-year outbreak cycle
+# ---------------------------------------------------------------------------
+
+def outbreak_cycle(
+    t,
+    outbreak_period_months=96,
+    amplitude=0.5
+):
+    """
+    Long-term outbreak waves
+    (~5–10 year ecological cycles).
+    """
+
+    return 1 + amplitude * np.sin(
+        2 * np.pi * t / outbreak_period_months
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main generator
+# ---------------------------------------------------------------------------
+
+def generate_bark_beetles_extended(
+    df,
+    initial_population=1000,
+
+    # growth parameters
+    r_base=0.25,
+    carrying_capacity=50000,
+
+    # predator parameters
+    alpha=0.00002,
+
+    # spatial interaction
+    gamma=0.05,
+    neighbor_weight=0.3,
+
+    # lagged predator effect
+    wood_lag_weights=(0.6, 0.4),
+
+    # mortality
+    winter_temp_threshold=0,
+    winter_mortality_rate=0.2,
+
+    # outbreak cycle
+    outbreak_period_months=96,
+
+    # noise
+    noise_std=200,
+
+    seed=None
+):
+    """
+    Generates synthetic bark beetle population.
+
+    Requires DataFrame columns:
+
+        avg_temperature_month
+        min_temperature_month
+        max_temperature_month
+        number_of_wood_cut
+
+    Optional:
+
+        neighbour_number_of_bark_beetles
+        neighbour_number_of_wood_cut
+
+    Returns:
+        pandas.Series
+    """
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    n = len(df)
+
+    bark_beetles = np.zeros(n)
+    bark_beetles[0] = initial_population
+
+    for t in range(1, n):
+
+        B_prev = bark_beetles[t - 1]
+
+        # -----------------------------------------
+        # Temperature effect
+        # -----------------------------------------
+
+        temp_factor = temperature_suitability(
+            df.loc[t, "avg_temperature_month"],
+            df.loc[t, "min_temperature_month"],
+            df.loc[t, "max_temperature_month"]
+        )
+
+        r_t = (
+            r_base
+            * temp_factor
+            * seasonal_factor(t)
+            * outbreak_cycle(
+                t,
+                outbreak_period_months
+            )
+        )
+
+        # -----------------------------------------
+        # Logistic growth
+        # -----------------------------------------
+
+        growth = (
+            r_t
+            * B_prev
+            * (1 - B_prev / carrying_capacity)
+        )
+
+        # -----------------------------------------
+        # Multi-lag wood cutting effect
+        # -----------------------------------------
+
+        lag1 = (
+            df.loc[t - 1,
+                   "number_of_wood_cut"]
+            if t - 1 >= 0
+            else 0
+        )
+
+        lag2 = (
+            df.loc[t - 2,
+                   "number_of_wood_cut"]
+            if t - 2 >= 0
+            else 0
+        )
+
+        wood_cut = (
+            wood_lag_weights[0] * lag1 +
+            wood_lag_weights[1] * lag2
+        )
+
+        predator_effect = (
+            alpha
+            * wood_cut
+            * B_prev
+        )
+
+        # -----------------------------------------
+        # Neighbor diffusion
+        # -----------------------------------------
+
+        if (
+            "neighbour_number_of_bark_beetles"
+            in df.columns
+        ):
+
+            neighbor_B = df.loc[
+                t - 1,
+                "neighbour_number_of_bark_beetles"
+            ]
+
+        elif (
+            "neighbour_number_of_wood_cut"
+            in df.columns
+        ):
+
+            neighbor_B = (
+                df.loc[
+                    t - 1,
+                    "neighbour_number_of_wood_cut"
+                ]
+                * 10
+            )
+
+        else:
+
+            neighbor_B = 0
+
+        spatial_effect = (
+            gamma
+            * neighbor_weight
+            * (neighbor_B - B_prev)
+        )
+
+        # -----------------------------------------
+        # Winter mortality
+        # -----------------------------------------
+
+        avg_temp = df.loc[
+            t,
+            "avg_temperature_month"
+        ]
+
+        winter_factor = 1
+
+        if avg_temp < winter_temp_threshold:
+
+            winter_factor = (
+                1 - winter_mortality_rate
+            )
+
+        # -----------------------------------------
+        # Noise
+        # -----------------------------------------
+
+        noise = np.random.normal(
+            0,
+            noise_std
+        )
+
+        # -----------------------------------------
+        # Final update
+        # -----------------------------------------
+
+        B_new = (
+            B_prev
+            + growth
+            - predator_effect
+            + spatial_effect
+        )
+
+        B_new *= winter_factor
+
+        B_new += noise
+
+        # prevent negatives
+        B_new = max(0, B_new)
+
+        bark_beetles[t] = B_new
+
+    return pd.Series(
+        bark_beetles,
+        name="number_of_bark_beetles"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,14 +342,9 @@ def main():
     N = len(parcels)
     print(f"  Parcels: {N:,}")
 
-    # Parcel index lookup
     parcel_idx: dict[tuple[str, str], int] = {
         (row.ggo, row.odsek): i for i, row in parcels.iterrows()
     }
-
-    # Carrying capacity proportional to parcel area
-    area = parcels["povrsina"].clip(lower=0.1).values.astype(np.float64)
-    K = K_BASE * area  # shape (N,)
 
     # ── 2. Spatial neighbour data ───────────────────────────────────────────
     print("Loading neighbour/station data...")
@@ -136,28 +381,32 @@ def main():
 
     W = W.tocsr()
     row_sums = np.asarray(W.sum(axis=1)).ravel()
-    row_sums[row_sums == 0] = 1.0  # isolated parcels stay unchanged
-    W_norm = diags(1.0 / row_sums).dot(W)  # row-normalised: rows sum to 1 (or 0)
+    row_sums[row_sums == 0] = 1.0
+    W_norm = diags(1.0 / row_sums).dot(W)
     print(f"  Edges: {W.nnz:,}")
 
-    # ── 4. Pre-build temperature matrix (N × T_steps) ───────────────────────
-    # Time range: 2007-01 to 2025-12
-    dates       = pd.period_range("2007-01", "2025-12", freq="M")
-    T_steps     = len(dates)
-    date_strs   = [str(p) for p in dates]
-    date_idx    = {s: t for t, s in enumerate(date_strs)}
+    # ── 4. Time range ────────────────────────────────────────────────────────
+    dates     = pd.period_range("2007-01", "2025-12", freq="M")
+    T_steps   = len(dates)
+    date_strs = [str(p) for p in dates]
+    date_idx  = {s: t for t, s in enumerate(date_strs)}
 
+    # ── 5. Weather data ──────────────────────────────────────────────────────
     print("Loading weather data...")
-    vreme = pd.read_csv(
-        VREME_IN,
-        usecols=["station_id", "leto_mesec", "povp_T_avg"],
-        low_memory=False,
-    )
+    vreme_all = pd.read_csv(VREME_IN, low_memory=False)
+    has_min_temp = "povp_T_min" in vreme_all.columns
+    has_max_temp = "povp_T_max" in vreme_all.columns
+
+    vreme = vreme_all[
+        ["station_id", "leto_mesec", "povp_T_avg"]
+        + (["povp_T_min"] if has_min_temp else [])
+        + (["povp_T_max"] if has_max_temp else [])
+    ].copy()
     vreme["station_id"] = vreme["station_id"].astype(int)
     global_mean_T = float(np.nanmean(vreme["povp_T_avg"].values))
     print(f"  Global mean temperature: {global_mean_T:.2f} °C")
 
-    # Station ID assigned to each parcel (prefer station_23, fallback station_123)
+    # Station assigned to each parcel
     parcel_station = np.full(N, -1, dtype=np.int64)
     postaje_idx = postaje.set_index(["ggo", "odsek_id"])
     for (ggo, odsek), i in parcel_idx.items():
@@ -168,28 +417,47 @@ def main():
             if pd.notna(sid):
                 parcel_station[i] = int(sid)
 
-    # Station temperature vectors
     unique_stations = set(parcel_station[parcel_station >= 0].tolist())
-    station_temp: dict[int, np.ndarray] = {
+
+    station_avg: dict[int, np.ndarray] = {
         sid: np.full(T_steps, global_mean_T, dtype=np.float32)
         for sid in unique_stations
     }
+    station_min: dict[int, np.ndarray] = {
+        sid: np.full(T_steps, global_mean_T, dtype=np.float32)
+        for sid in unique_stations
+    }
+    station_max: dict[int, np.ndarray] = {
+        sid: np.full(T_steps, global_mean_T, dtype=np.float32)
+        for sid in unique_stations
+    }
+
     for _, row in vreme.iterrows():
         sid = int(row["station_id"])
         lm  = row["leto_mesec"]
-        if sid in station_temp and lm in date_idx and pd.notna(row["povp_T_avg"]):
-            station_temp[sid][date_idx[lm]] = float(row["povp_T_avg"])
+        if sid not in station_avg or lm not in date_idx:
+            continue
+        t = date_idx[lm]
+        if pd.notna(row["povp_T_avg"]):
+            avg_val = float(row["povp_T_avg"])
+            station_avg[sid][t] = avg_val
+            station_min[sid][t] = float(row["povp_T_min"]) if has_min_temp and pd.notna(row.get("povp_T_min")) else avg_val
+            station_max[sid][t] = float(row["povp_T_max"]) if has_max_temp and pd.notna(row.get("povp_T_max")) else avg_val
 
-    # Assemble (N × T_steps) temperature matrix
-    print("Building temperature matrix...")
-    temp_matrix = np.full((N, T_steps), global_mean_T, dtype=np.float32)
+    print("Building temperature matrices...")
+    avg_matrix = np.full((N, T_steps), global_mean_T, dtype=np.float32)
+    min_matrix = np.full((N, T_steps), global_mean_T, dtype=np.float32)
+    max_matrix = np.full((N, T_steps), global_mean_T, dtype=np.float32)
+
     for i in range(N):
         sid = parcel_station[i]
-        if sid >= 0 and sid in station_temp:
-            temp_matrix[i] = station_temp[sid]
+        if sid >= 0 and sid in station_avg:
+            avg_matrix[i] = station_avg[sid]
+            min_matrix[i] = station_min[sid]
+            max_matrix[i] = station_max[sid]
 
-    # ── 5. Pre-build harvest matrix (N × T_steps) ───────────────────────────
-    print("Loading and normalising harvest data...")
+    # ── 6. Harvest data ──────────────────────────────────────────────────────
+    print("Loading harvest data...")
     posek = pd.read_csv(
         POSEK_IN,
         usecols=["ggo", "odsek", "leto_mesec", "rolling_mean_3"],
@@ -199,12 +467,6 @@ def main():
     posek["odsek"]         = posek["odsek"].astype(str)
     posek["rolling_mean_3"] = pd.to_numeric(posek["rolling_mean_3"], errors="coerce").fillna(0.0)
 
-    # Normalize to [0, 1] per parcel
-    parcel_max = posek.groupby(["ggo", "odsek"])["rolling_mean_3"].transform("max")
-    posek["H_prime"] = posek["rolling_mean_3"] / (parcel_max + 1e-9)
-    posek["H_prime"] = posek["H_prime"].fillna(0.0).clip(0.0, 1.0)
-
-    # Map (ggo, odsek) → parcel index
     parcels_idx_series = pd.Series(
         range(N),
         index=pd.MultiIndex.from_arrays([parcels["ggo"], parcels["odsek"]]),
@@ -219,73 +481,62 @@ def main():
     harvest_matrix[
         valid_posek["parcel_i"].values.astype(int),
         valid_posek["time_t"].values.astype(int),
-    ] = valid_posek["H_prime"].values.astype(np.float32)
+    ] = valid_posek["rolling_mean_3"].values.astype(np.float32)
     print(f"  Harvest entries mapped: {len(valid_posek):,}")
 
-    # ── 6. Initialise population ─────────────────────────────────────────────
-    # Seed at 2–15 % of carrying capacity with spatial heterogeneity
-    B = rng.uniform(0.02, 0.15, size=N) * K
+    # ── 7. Neighbour wood cut (weighted average over spatial neighbours) ──────
+    print("Computing neighbour wood cut...")
+    neighbour_harvest = np.zeros((N, T_steps), dtype=np.float32)
+    if W_norm.nnz > 0:
+        for t in range(T_steps):
+            neighbour_harvest[:, t] = W_norm.dot(harvest_matrix[:, t])
 
-    # ── 7. Simulation ────────────────────────────────────────────────────────
+    # ── 8. Per-parcel simulation ─────────────────────────────────────────────
     print(f"\nRunning simulation: {T_steps} months × {N:,} parcels...")
+    B_history = np.zeros((N, T_steps), dtype=np.float32)
 
-    B_history = np.empty((N, T_steps), dtype=np.float32)
+    for i in range(N):
+        if i % 1000 == 0 and i > 0:
+            print(f"  Parcel {i:,}/{N:,}")
 
-    for t, period in enumerate(dates):
-        month = period.month
+        parcel_df = pd.DataFrame({
+            "avg_temperature_month":      avg_matrix[i],
+            "min_temperature_month":      min_matrix[i],
+            "max_temperature_month":      max_matrix[i],
+            "number_of_wood_cut":         harvest_matrix[i],
+            "neighbour_number_of_wood_cut": neighbour_harvest[i],
+        })
 
-        # Temperature-driven growth with seasonality
-        T_arr = temp_matrix[:, t].astype(np.float64)
-        r = growth_rate(T_arr, month)
+        initial_pop = float(rng.uniform(0.02, 0.15) * 50000)
 
-        # 1. Logistic growth
-        B += r * B * (1.0 - B / K)
+        result_series = generate_bark_beetles_extended(
+            parcel_df,
+            initial_population=initial_pop,
+            seed=RNG_SEED + i,
+        )
 
-        # 2. Harvest reduction
-        H = harvest_matrix[:, t].astype(np.float64)
-        B *= 1.0 - ALPHA * H
+        B_history[i] = result_series.values.astype(np.float32)
 
-        # 3. Spatial diffusion: spread toward neighbour average
-        if W_norm.nnz > 0:
-            B += BETA * (W_norm.dot(B) - B)
+    print("  Done.")
 
-        # 4. Gaussian noise (relative to carrying capacity)
-        B += rng.normal(0.0, SIGMA * K)
-
-        # 5. Clamp to [0, 3*K] — no negatives, no runaway explosions
-        B = np.clip(B, 0.0, 3.0 * K)
-
-        B_history[:, t] = B.astype(np.float32)
-
-        if (t + 1) % 36 == 0 or t == 0:
-            print(
-                f"  {date_strs[t]}: "
-                f"mean={B.mean():.1f}  "
-                f"median={np.median(B):.1f}  "
-                f"max={B.max():.0f}"
-            )
-
-    # ── 8. Assemble output DataFrame ─────────────────────────────────────────
+    # ── 9. Assemble output DataFrame ─────────────────────────────────────────
     print("\nAssembling output...")
 
-    # Axis order: (parcel, time) → flatten in parcel-major order
-    # so each parcel's time series is contiguous, matching posek_processed layout
     ggo_out   = np.repeat(parcels["ggo"].values,   T_steps)
     odsek_out = np.repeat(parcels["odsek"].values, T_steps)
     lm_out    = np.tile(date_strs, N)
     count_out = np.maximum(0, np.round(B_history)).astype(np.int32).ravel()
 
     result = pd.DataFrame({
-        "ggo":              ggo_out,
-        "odsek":            odsek_out,
-        "leto_mesec":       lm_out,
+        "ggo":               ggo_out,
+        "odsek":             odsek_out,
+        "leto_mesec":        lm_out,
         "bark_beetle_count": count_out,
     })
 
-    # Sort to match canonical (ggo, odsek, leto_mesec) ordering
     result = result.sort_values(["ggo", "odsek", "leto_mesec"]).reset_index(drop=True)
 
-    # ── 9. Save ──────────────────────────────────────────────────────────────
+    # ── 10. Save ─────────────────────────────────────────────────────────────
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(OUT_PATH, index=False)
 

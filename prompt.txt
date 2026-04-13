@@ -1,2 +1,178 @@
-We found out that odsek_id is not unique, rather [ggo, odsek_id] is.
-Go through every .py file inside src/data_processing and change it so ggo is set as a key identifiyer together with odsek_id.
+# Training and Prediction Pipeline Task
+
+You are implementing training and inference code for a prediction task.
+
+---
+
+# Dataset Description
+
+The file **`train.csv`** contains the following feature columns:
+
+ggo, odsek, leto_mesec,
+mesec_sin, mesec_cos,
+diff_1, expanding_mean,
+lag_1, lag_2, lag_3, lag_6, lag_12, lag_24,
+rolling_mean_3, rolling_mean_6, rolling_mean_12,
+rolling_std_3, rolling_std_6, rolling_std_12,
+leto_povp_T_avg, leto_max_T_mesec, leto_min_T_mesec,
+leto_padavine_skupaj_mm, leto_padavine_avg_mm,
+leto_dni_s_padavinami,
+leto_snezna_odeja_max_cm,
+leto_novi_sneg_skupaj_cm,
+leto_dni_s_snegom,
+leto_dni_nevihta,
+leto_dni_toca,
+leto_dni_viharni_veter,
+leto_st_mesecev,
+sosedi_lag_1_sum, sosedi_lag_1_mean,
+sosedi_lag_2_sum, sosedi_lag_2_mean,
+sosedi_lag_12_sum, sosedi_lag_12_mean,
+sosedi_rolling_mean_12_mean,
+sosedi_rolling_std_12_mean,
+sosedi_st_sosedov,
+leto
+
+
+The dataset uses the following **multi-index**:
+
+
+['ggo', 'odsek', 'leto_mesec']
+
+
+---
+
+# Data Locations
+
+## Feature datasets
+
+
+data/processed/splits/train.csv
+data/processed/splits/val.csv
+data/processed/splits/test.csv
+
+
+## Target values
+
+
+data/processed/target.csv
+
+
+The `target.csv` file contains the target variable corresponding to the same index structure and has the following columns:
+[ h1, h2, ... , h12 ]
+
+---
+
+# Task
+
+Implement two scripts:
+
+- `src/training/train.py`
+- `src/training/test.py`
+
+These scripts will handle model training and prediction.
+
+---
+
+# 1. train.py Requirements
+
+This script should:
+
+1. Load:
+   - `train.csv`
+   - `val.csv`
+   - `target.csv`
+
+2. Merge features with targets using the index:
+
+
+['ggo', 'odsek', 'leto_mesec']
+
+
+3. Train a predictive model.
+
+4. Handle **strong class imbalance**, since:
+
+
+~90% of target values are 0
+
+
+Use appropriate techniques such as:
+
+- class weighting
+- resampling
+- imbalance-aware models
+
+5. Evaluate model performance on the validation set.
+
+6. Save the trained model to:
+
+
+models/model.pkl
+
+
+---
+
+# 2. test.py Requirements
+
+This script should:
+
+1. Load:
+
+- `test.csv`
+- `target.csv` (if needed)
+- `models/model.pkl`
+
+2. Generate predictions for the test set.
+
+3. Save predictions to:
+
+
+predictions/test_predictions.csv
+
+
+The output file must:
+
+- Preserve the original index:
+
+
+['ggo', 'odsek', 'leto_mesec']
+
+
+- Contain one 12 column:
+
+[h1, h2, ..., h12]
+
+
+---
+
+# Additional Requirements
+
+- Use **Python**
+- Use standard ML libraries such as:
+
+
+pandas
+numpy
+scikit-learn
+
+
+- Handle missing values if present.
+- Ensure reproducibility using a fixed random seed.
+- Write clean, modular, and readable code.
+- Log validation metrics during training.
+
+---
+
+# Important Notes
+
+- The dataset contains **time-based lag features**, so avoid data leakage.
+- The prediction target is **highly imbalanced (~90% zeros)**.
+- Choose evaluation metrics appropriate for imbalanced classification.
+
+Recommended metrics:
+
+
+F1-score
+Precision
+Recall
+ROC-AUC

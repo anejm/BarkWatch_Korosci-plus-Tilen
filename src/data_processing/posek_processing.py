@@ -32,7 +32,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 LOG_TARGET: bool = True
 
-LAGS    = [1, 3, 6, 12, 24]
+MIN_KUBIKOV_TOTAL: float = 200.0   # drop [ggo, odsek] whose total raw kubikov < this
+
+LAGS    = [1, 2, 3, 6, 12, 24]
 WINDOWS = [3, 6, 12]
 HORIZON = 12
 
@@ -55,6 +57,8 @@ def _build_monthly(raw_path: Path = RAW_POSEK) -> pd.DataFrame:
     Load raw posek CSV, aggregate kubikov to monthly sums per odsek, then
     expand each [ggo, odsek] to cover the global date range so every
     group has the same number of rows. Missing months are filled with 0.
+
+    Filtering is applied on raw kubikov sums before any transformation.
     """
     df_raw = pd.read_csv(raw_path, low_memory=False)
     df_raw.columns = df_raw.columns.str.strip()
@@ -77,6 +81,11 @@ def _build_monthly(raw_path: Path = RAW_POSEK) -> pd.DataFrame:
     )
     monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
 
+    # Filter on raw kubikov totals (before any log transform)
+    pair_totals = monthly.groupby(["ggo", "odsek"])["target"].sum()
+    valid_pairs = pair_totals[pair_totals >= MIN_KUBIKOV_TOTAL].index
+    monthly = monthly.set_index(["ggo", "odsek"]).loc[valid_pairs].reset_index()
+
     # Build complete grid: every (ggo, odsek) × every month in global range
     global_min = monthly["datum"].min()
     global_max = monthly["datum"].max()
@@ -95,21 +104,30 @@ def _build_monthly(raw_path: Path = RAW_POSEK) -> pd.DataFrame:
     return monthly
 
 
+def _apply_target_transform(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply log1p transform to target in-place if LOG_TARGET is set."""
+    if LOG_TARGET:
+        df["target"] = np.log1p(df["target"])
+    return df
+
+
 def _add_calendar(df: pd.DataFrame) -> pd.DataFrame:
-    """Add calendar and log-transform columns."""
-    df["leto"]          = df["datum"].dt.year
-    df["mesec"]         = df["datum"].dt.month
-    df["leto_mesec"]    = df["datum"].dt.to_period("M").astype(str)
-    df["mesec_sin"]     = np.sin(2 * np.pi * df["mesec"] / 12)
-    df["mesec_cos"]     = np.cos(2 * np.pi * df["mesec"] / 12)
-    df["log1p_target"]  = np.log1p(df["target"])
+    """Add calendar columns."""
+    df["leto"]       = df["datum"].dt.year
+    df["mesec"]      = df["datum"].dt.month
+    df["leto_mesec"] = df["datum"].dt.to_period("M").astype(str)
+    df["mesec_sin"]  = np.sin(2 * np.pi * df["mesec"] / 12)
+    df["mesec_cos"]  = np.cos(2 * np.pi * df["mesec"] / 12)
     return df
 
 
 def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add lag, rolling, diff, and expanding features per [ggo, odsek]."""
-    _base_col = "log1p_target" if LOG_TARGET else "target"
-    grp = df.groupby(["ggo", "odsek"])[_base_col]
+    """Add lag, rolling, diff, and expanding features per [ggo, odsek].
+
+    All features are computed on `target`, which has already been
+    log-transformed (if LOG_TARGET) before this function is called.
+    """
+    grp = df.groupby(["ggo", "odsek"])["target"]
 
     for lag in LAGS:
         df[f"lag_{lag}"] = grp.shift(lag)
@@ -146,12 +164,13 @@ def preprocess() -> pl.DataFrame:
         polars DataFrame with monthly per-[ggo, odsek] feature table.
     """
     monthly = _build_monthly()
+    monthly = _apply_target_transform(monthly)
     monthly = _add_calendar(monthly)
     monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["ggo", "odsek", "leto_mesec",
+        ["ggo", "odsek", "leto_mesec", "target",
          "mesec_sin", "mesec_cos",
          "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
@@ -175,6 +194,7 @@ def make_target_kubikov() -> pl.DataFrame:
         polars DataFrame with columns: ggo, odsek, leto_mesec, h_1 … h_36.
     """
     monthly = _build_monthly()
+    monthly = _apply_target_transform(monthly)
     monthly = _add_calendar(monthly)
 
     base = monthly[["ggo", "odsek", "leto_mesec", "target"]].copy()
@@ -190,11 +210,6 @@ def make_target_kubikov() -> pl.DataFrame:
 
     target_df = base[["ggo", "odsek", "leto_mesec"]].copy()
     target_df = pd.concat([target_df] + horizon_frames, axis=1)
-
-    if LOG_TARGET:
-        h_cols = [f"h{h}" for h in range(1, HORIZON + 1)]
-        target_df[h_cols] = np.log1p(target_df[h_cols])
-
     target_df = target_df.reset_index(drop=True)
     return pl.from_pandas(target_df)
 
@@ -213,6 +228,7 @@ def main():
         f"Months per group: {n_months:,}"
     )
 
+    monthly = _apply_target_transform(monthly)
     monthly = _add_calendar(monthly)
     monthly = monthly.sort_values(["ggo", "odsek", "datum"]).reset_index(drop=True)
 
@@ -220,7 +236,7 @@ def main():
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["ggo", "odsek", "leto_mesec",
+        ["ggo", "odsek", "leto_mesec", "target",
          "mesec_sin", "mesec_cos",
          "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
@@ -230,6 +246,10 @@ def main():
     out_features = monthly[feature_cols].reset_index(drop=True)
     out_features.to_csv(FEATURES_OUT, index=False)
     print(f"  Saved {len(out_features):,} rows  →  {FEATURES_OUT}")
+
+    num_zero = (out_features.target == 0).sum()
+    num_non_zero = (out_features.target != 0).sum()
+    print(f"Number of 0 targets: {num_zero}, number of non-0 targets: {num_non_zero}")
 
     print(f"Building target matrix ({HORIZON} horizons) …")
     target_df = make_target_kubikov().to_pandas()

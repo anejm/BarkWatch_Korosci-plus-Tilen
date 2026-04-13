@@ -11,7 +11,7 @@ For each horizon h_i:
                that otherwise compounds through the sequential chain).
   Stage 2    = LGBMRegressor   → magnitude (Huber loss, non-zero rows only)
   Prediction = (prob >= threshold) * max(reg_output, 0)
-
+w
 Improvements over XGBoost baseline:
   - LightGBM + Huber loss: robust to large-harvest outliers that caused
     RMSE >> MAE (21.7 vs 5.3 m³) in the original model.
@@ -70,10 +70,7 @@ from models.model import TwoStageHorizonModel, add_derived_features, sanitize_co
 POSSIBLE_KEYS = ["ggo", "odsek", "odsek_id", "leto_mesec"]
 
 DROP_COLS = [
-    "datum", "leto", "target", "log1p_target",
-    "sosedi_target_sum", "sosedi_target_mean",
-    "sosedi_target_std", "sosedi_target_median",
-    "sosedi_log1p_target_mean",
+    "datum", "leto",
 ]
 TARGET_COLS = [f"h{h}" for h in range(1, 13)]
 
@@ -220,17 +217,15 @@ def train(short: bool, synthetic: bool = False) -> None:
         print(f"  clf  pos={n_pos:,}  neg={n_neg:,}  "
               f"val_pos_rate={y_v_bin.mean():.3f} …", end=" ", flush=True)
 
-        # scale_pos_weight: 0.75-power ratio — stronger than sqrt (~5x) but
-        # less aggressive than full ratio (~25x), balancing recall and precision.
-        spw = (n_neg / max(n_pos, 1)) ** 0.75
+        # scale_pos_weight: full ratio — aggressively upweights the minority
+        # positive class so the classifier learns to predict non-zero events.
+        spw = (n_neg / max(n_pos, 1)) ** 1.0
 
-        # For late horizons, use precision-favouring threshold (beta=0.7)
-        # to suppress the positive bias that compounds through sequential chain.
-        precision_mode = col in PRECISION_MODE_HORIZONS
-
+        # threshold search now uses beta=2.0 (recall-favoring) for all horizons;
+        # precision_mode is ignored inside TwoStageHorizonModel.
         model = TwoStageHorizonModel(
             scale_pos_weight=spw,
-            precision_mode=precision_mode,
+            precision_mode=False,
         )
         model.fit(X_tr, y_tr, X_v, y_v)
 
@@ -325,11 +320,15 @@ def train(short: bool, synthetic: bool = False) -> None:
 
 
 def _lgb_predict(m: dict, X: pd.DataFrame) -> np.ndarray:
-    """Unified predict using stored clf/reg/threshold (testing.py compatible)."""
+    """Unified predict using stored clf/reg/threshold (testing.py compatible).
+
+    Soft-blend: mirrors TwoStageHorizonModel.predict().
+    """
     clf_prob = m["clf"].predict_proba(X)[:, 1]
-    clf_bin  = (clf_prob >= m["threshold"]).astype(int)
     reg_pred = np.maximum(m["reg"].predict(X), 0.0)
-    return clf_bin * reg_pred
+    threshold = m["threshold"]
+    weight = np.where(clf_prob >= threshold, 1.0, clf_prob / threshold)
+    return weight * reg_pred
 
 
 if __name__ == "__main__":

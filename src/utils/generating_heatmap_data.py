@@ -125,7 +125,7 @@ def expand_future_predictions(future_path: Path) -> pd.DataFrame:
             .dt.to_period("M")
             .astype(str)
         )
-        tmp["target"] = tmp[col]
+        tmp["target"] = tmp[col].where(tmp[col] >= 1, 0)
         tmp = tmp.rename(columns={odsek_col: "odsek_id"})
         rows.append(tmp[["ggo", "odsek_id", "leto_mesec", "target"]])
 

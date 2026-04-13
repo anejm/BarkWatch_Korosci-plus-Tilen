@@ -47,17 +47,15 @@ OUT_PATH    = ROOT / "data" / "processed" / "agg_posek_sosedi.csv"
 # not be available at prediction time. Lag_1 corresponds to the previous
 # month's neighbour harvest, which is a safe leading indicator.
 AGG_SPEC = {
+    "target":          ["sum", "mean"],
     "lag_1":           ["sum", "mean"],
-    "lag_3":           ["sum", "mean"],
-    "lag_6":           ["sum", "mean"],
+    "lag_2":           ["sum", "mean"],
     "lag_12":          ["sum", "mean"],
-    "rolling_mean_3":  ["mean"],
-    "rolling_mean_6":  ["mean"],
     "rolling_mean_12": ["mean"],
     "rolling_std_12":  ["mean"],
 }
 
-POSEK_COLS = ["ggo", "odsek", "leto_mesec", "target"] + list(AGG_SPEC.keys())
+POSEK_COLS = ["ggo", "odsek", "leto_mesec"] + list(AGG_SPEC.keys())
 
 
 # ---------------------------------------------------------------------------

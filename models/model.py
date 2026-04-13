@@ -235,12 +235,14 @@ class TwoStageHorizonModel:
     def __init__(
         self,
         scale_pos_weight: float = 1.0,
-        precision_mode: bool = False,   # True for h8-h12 to reduce positive bias
+        precision_mode: bool = False,   # unused — kept for API compat
         clf_overrides: Optional[dict] = None,
         reg_overrides: Optional[dict] = None,
     ):
         self.precision_mode = precision_mode
-        self._fbeta = 0.7 if precision_mode else 1.0
+        # beta=2.0 strongly favours recall: we want to predict non-zero whenever
+        # there is any reasonable signal, accepting more false positives.
+        self._fbeta = 2.0
 
         clf_params = {**_CLF_DEFAULTS, "scale_pos_weight": scale_pos_weight}
         if clf_overrides:
@@ -302,11 +304,18 @@ class TwoStageHorizonModel:
 
     # -----------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        """Return combined two-stage prediction (log1p space)."""
+        """Return combined two-stage prediction (log1p space).
+
+        Soft-blend: samples above the threshold get full reg_pred; samples
+        below threshold are scaled by clf_prob/threshold rather than hard-zeroed.
+        This ensures borderline-positive samples still produce a non-zero
+        prediction proportional to the classifier's confidence.
+        """
         clf_prob = self.clf.predict_proba(X)[:, 1]
-        clf_bin  = (clf_prob >= self.threshold).astype(int)
         reg_pred = np.maximum(self.reg.predict(X), 0.0)
-        return clf_bin * reg_pred
+        # weight=1 above threshold, weight=prob/threshold below it (still >0)
+        weight = np.where(clf_prob >= self.threshold, 1.0, clf_prob / self.threshold)
+        return weight * reg_pred
 
     # -----------------------------------------------------------------------
     def _find_threshold(
