@@ -47,7 +47,7 @@ fi
 #           data/processed/target.csv  (12-horizon targets, log1p)
 # ---------------------------------------------------------------------------
 echo "[$(date '+%H:%M:%S')] Running pipeline.py ..."
-python src/pipeline.py --weather --sosedi --odseki
+python src/pipeline.py --weather --sosedi
 
 # ---------------------------------------------------------------------------
 # Step 2: Create shortened CSVs (first 100 rows) for local inspection

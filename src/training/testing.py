@@ -117,9 +117,10 @@ def prepare_test(test_x: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def _two_stage_predict(clf, reg, X: pd.DataFrame, threshold: float = 0.5) -> np.ndarray:
     clf_prob = clf.predict_proba(X)[:, 1]
-    clf_bin  = (clf_prob >= threshold).astype(int)
     reg_pred = np.maximum(reg.predict(X), 0)
-    return clf_bin * reg_pred
+    # Soft-blend: full weight above threshold, proportional weight below it.
+    weight = np.where(clf_prob >= threshold, 1.0, clf_prob / threshold)
+    return weight * reg_pred
 
 
 # ---------------------------------------------------------------------------
