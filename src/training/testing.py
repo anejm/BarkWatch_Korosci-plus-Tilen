@@ -59,7 +59,7 @@ TARGET_COLS   = [f"h{h}" for h in range(1, 13)]
 PRED_COLS     = [f"h{h}_pred" for h in range(1, 13)]
 
 # When True, targets in target.csv are in log1p space; expm1 before evaluation.
-LOG_TARGET: bool = True
+LOG_TARGET: bool = False
 
 
 # ---------------------------------------------------------------------------

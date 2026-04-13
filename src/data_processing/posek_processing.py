@@ -30,7 +30,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-LOG_TARGET: bool = True
+LOG_TARGET: bool = False
 
 MIN_KUBIKOV_TOTAL: float = 200.0   # drop [ggo, odsek] whose total raw kubikov < this
 
