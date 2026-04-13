@@ -1,3 +1,4 @@
+
 """
 generate_bark_beetle_csv.py
 ---------------------------
@@ -57,6 +58,9 @@ PARAMS = {
     "noise_std":  20.0,   # stochastic noise std
     "temp_opt":   20.0,   # optimal temperature (°C) for bark beetles
     "temp_width": 10.0,   # temperature tolerance (°C, Gaussian half-width)
+    # winter mortality
+    "eta":        0.05,   # strength of cold mortality
+    "T_crit":    -10.0,   # min-temp threshold below which beetles die
 }
 
 RNG_SEED = 42
@@ -181,7 +185,7 @@ def main():
     print("Loading station mapping …")
     postaje = pd.read_csv(POSTAJE_IN, low_memory=False)
     postaje["odsek_id"] = postaje["odsek_id"].astype(str)
-    postaje = postaje.set_index("odsek_id")
+    postaje = postaje.drop_duplicates(subset=["odsek_id"]).set_index("odsek_id")
 
     # For each odsek pick one station: prefer station_23, fall back to station_123
     parcel_station = np.full(N, -1, dtype=np.int64)
@@ -247,6 +251,8 @@ def main():
     t_opt  = p["temp_opt"]
     t_wid  = p["temp_width"]
     noise_std = p["noise_std"]
+    eta    = p["eta"]
+    T_crit = p["T_crit"]
 
     # Seed population at ~10 % of K with spatial variation
     B = rng.uniform(0.05, 0.15, size=N) * K
@@ -278,11 +284,14 @@ def main():
             mean_nbr_B = B
         neighbour_effect = gamma * (mean_nbr_B - B)
 
+        # --- Winter mortality (activates when min_T drops below T_crit) ---
+        winter_mortality = eta * np.maximum(0.0, T_crit - min_T[:, t]) * B
+
         # --- Stochastic noise ---
         noise = rng.normal(0.0, noise_std, size=N)
 
         # --- Update & clamp ---
-        B = B + growth + temp_growth - predation + neighbour_effect + noise
+        B = B + growth + temp_growth - predation - winter_mortality + neighbour_effect + noise
         B = np.maximum(B, 0.0)
 
         B_history[:, t] = B.astype(np.float32)
