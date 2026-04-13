@@ -170,7 +170,7 @@ def preprocess() -> pl.DataFrame:
     monthly = _add_lag_features(monthly)
 
     feature_cols = (
-        ["ggo", "odsek", "leto_mesec",
+        ["ggo", "odsek", "leto_mesec", "target",
          "mesec_sin", "mesec_cos",
          "diff_1", "expanding_mean"]
         + [f"lag_{l}"          for l in LAGS]
