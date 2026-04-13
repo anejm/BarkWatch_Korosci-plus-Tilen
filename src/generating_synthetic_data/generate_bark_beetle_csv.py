@@ -40,7 +40,7 @@ from scipy.sparse import lil_matrix, diags
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "data"
 
-POSEK_IN   = DATA / "processed" / "posek_processed.csv"
+POSEK_IN   = DATA / "raw" / "ZGS" / "posek.csv"
 POSTAJE_IN = DATA / "processed" / "najblizji_odseki_postaje.csv"
 VREME_IN   = DATA / "raw" / "ARSO" / "vreme.csv"
 OUT_PATH   = DATA / "synthetic" / "bark_beetle_by_odsek.csv"
