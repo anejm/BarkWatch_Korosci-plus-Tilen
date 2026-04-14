@@ -1,6 +1,3 @@
-# examples
-# flask==2.3.2
-# requests
 #install with: pip install -r requirements.txt
 requests
 numpy
@@ -15,6 +12,5 @@ lightgbm
 joblib
 polars
 pyarrow
-
 matplotlib
 seaborn

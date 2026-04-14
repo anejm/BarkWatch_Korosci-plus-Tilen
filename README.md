@@ -2,17 +2,25 @@
 
 **AI-powered bark beetle early-warning system for Slovenian forests.**
 
-Built at the Arnes Hackathon 2026 by Korošci+Tilen.
+Built for the Arnes Hackathon 2026 by Korošci+Tilen.
 
 ---
 
-## Overview
+## Interface
 
-Slovenia is one of the most forested countries in Europe — roughly 58 % of its land is covered in forest. Bark beetles (*podlubniki*) are a major natural threat that can silently devastate large areas before a forester can respond. By the time visual damage appears, the infestation is already months old.
+The interface is an interactive MapLibre map where you can browse monthly forecasts and inspect details for each forest sector.
 
-BarkWatch turns historical forest harvest records (*posek*) and meteorological observations into a 12-month forward-looking bark beetle risk forecast. Predictions are served through an interactive web map where foresters, planners, and researchers can explore the entire country at the individual forest sector (*odsek*) level.
+Run:
 
-**Web interface repo:** [BarkWatch_Arnes-Hackathon-2026_interface](../BarkWatch_Arnes-Hackathon-2026_interface)
+```bash
+python interface/server.py
+```
+
+Then open `http://localhost:8000`.
+
+Detailed interface documentation is available in [interface/README_interface.md](interface/README_interface.md).
+
+
 
 ---
 
@@ -46,57 +54,6 @@ The model is a **sequential two-stage LightGBM pipeline** — one model per fore
 
 Thresholds are tuned via F-beta maximisation on the validation set. For longer horizons (h8 – h12) beta = 0.7 to suppress positive-bias compounding.
 
-**Feature groups:**
-- Lagged harvest volumes per sector and its neighbours
-- Aggregated forest stand attributes (species mix, age, density)
-- Monthly weather (temperature, precipitation) from the nearest weather station
-- Derived time features (month, year, seasonal indicators)
-
----
-
-## Repository structure
-
-```
-BarkWatch-arnes_hackathon2026/
-├── config/
-│   └── config.json                    # Shared configuration
-├── data/
-│   ├── raw/
-│   │   ├── ARSO/                      # Raw weather station data
-│   │   └── ZGS/                       # Raw harvest + GIS data
-│   │       └── images/
-│   ├── processed/                     # Cleaned data ready for training
-│   │   ├── posek_processed.csv
-│   │   ├── odseki_processed.csv
-│   │   ├── sestoji_processed.csv
-│   │   ├── vreme_mesecno.csv
-│   │   ├── agg_posek_meritve.csv
-│   │   ├── agg_posek_sosedi.csv
-│   │   ├── target.csv                 # Final ML target table
-│   │   ├── splits/                    # train / val / test splits
-│   │   └── current_state.csv          # Latest snapshot for live inference
-│   ├── synthetic/                     # Synthetic bark beetle population
-│   └── predictions/                   # Model output CSVs
-├── models/
-│   ├── lgb_models.pkl                 # Trained LightGBM models (h1–h12)
-│   └── model.py                       # TwoStageHorizonModel definition
-├── notebooks/                         # Exploration and validation notebooks
-├── scripts/                           # Helper scripts
-├── src/
-│   ├── data_processing/               # Raw → processed pipeline
-│   ├── generating_synthetic_data/     # Synthetic population model
-│   ├── training/
-│   │   ├── train.py                   # Train all 12 horizon models
-│   │   └── testing.py                 # Evaluate on test set (MAE / RMSE)
-│   ├── inference/
-│   ├── utils/
-│   │   └── generating_heatmap_data.py # Export CSVs for the frontend
-│   ├── extract_current_day_data.py    # Snapshot latest state for inference
-│   ├── predict_the_future.py          # Run sequential inference h1–h12
-│   └── pipeline.py                    # End-to-end processing pipeline
-└── job_*.slurm                        # SLURM job scripts for HPC cluster
-```
-
 ---
 
 ## Getting started
@@ -125,15 +82,6 @@ python src/training/testing.py
 python src/extract_current_day_data.py
 python src/predict_the_future.py
 python src/utils/generating_heatmap_data.py
-```
-
-### Scenario overrides (inference)
-
-```bash
-python src/predict_the_future.py \
-  --padavine veliko \       # rainfall: malo | normalno | veliko  (×0.25 / ×1 / ×2)
-  --temperatura visoko \    # temperature: nizko | normalno | visoko  (−3 / 0 / +3 °C)
-  --h1 1.5                  # multiply h1 prediction before feeding into h2–h12
 ```
 
 ### HPC / SLURM

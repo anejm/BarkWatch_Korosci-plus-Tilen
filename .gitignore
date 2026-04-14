@@ -1,11 +1,6 @@
 venv
 .venv
-.vscode
-*.csv
-data/processed/odseki_processed.csv
-data/raw/ZGS/odseki_gozdno.gpkg
-data/raw/ZGS/sestoji.gpkg
-api/
-*.csv
-
+data/**/*.csv
+data/**/*.gpkg
 __pycache__/
+interface/data/*.json
