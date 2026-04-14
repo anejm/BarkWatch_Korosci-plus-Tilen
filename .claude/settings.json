@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(wc -l /home/zan/dev/Projects/BarkWatch-arnes_hackathon2026/data/processed/*.csv)",
-      "Bash(python3 -c \"import pandas as pd; df = pd.read_csv\\('/home/zan/dev/Projects/BarkWatch-arnes_hackathon2026/data/processed/odseki_processed.csv', usecols=['ggo','odsek','povrsina']\\); print\\(df.shape\\); print\\(df.dtypes\\); print\\(df.head\\(3\\)\\)\")",
-      "Bash(python3 src/generating_synthetic_data/synthetic_pipeline.py)"
-    ]
-  }
-}
