@@ -1,0 +1,3 @@
+[submodule "interface"]
+	path = interface
+	url = https://github.com/tilnp/BarkWatch_Arnes-Hackathon-2026_interface

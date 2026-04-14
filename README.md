@@ -18,7 +18,7 @@ python interface/server.py
 
 Then open `http://localhost:8000`.
 
-Detailed interface documentation is available in [interface/README_interface.md](interface/README_interface.md).
+Detailed interface documentation is available in [interface/README.md](interface/README.md).
 
 
 
