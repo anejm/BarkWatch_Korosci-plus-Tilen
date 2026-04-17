@@ -10,7 +10,32 @@ Built for the Arnes Hackathon 2026 by Korošci+Tilen.
 
 The interface is an interactive MapLibre map where you can browse monthly forecasts and inspect details for each forest sector.
 
-Run:
+> **Note:** The interface is a git submodule — it is **not** checked out automatically when you clone this repo.
+
+### Requirements
+
+- [Git LFS](https://git-lfs.github.com/) must be installed **before** pulling the submodule (it stores large data files).
+
+```bash
+# Install Git LFS (once per machine)
+git lfs install
+```
+
+### Pull the submodule & run
+
+If you already cloned this repo:
+
+```bash
+git submodule update --init
+```
+
+Or clone everything in one step from the start:
+
+```bash
+git clone --recurse-submodules <this-repo-url>
+```
+
+Then start the server:
 
 ```bash
 python interface/server.py
